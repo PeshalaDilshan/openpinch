@@ -1,0 +1,68 @@
+# Rust (core/)
+/target/
+**/*.rs.bk
+Cargo.lock  # Keep for executables; remove/comment if you prefer for libraries only
+
+# Go (gateway/)
+/gateway/bin/
+/gateway/pkg/
+/gateway/vendor/
+
+# Flutter / Dart (ui/)
+/ui/.dart_tool/
+/ui/.flutter-plugins
+/ui/.flutter-plugins-dependencies
+/ui/.metadata
+/ui/.pub-cache/
+/ui/build/
+/ui/ios/Flutter/App.framework/
+/ui/ios/Flutter/Flutter.framework/
+/ui/ios/Flutter/flutter_export_environment.sh
+/ui/android/app/debug
+/ui/android/app/profile
+/ui/android/app/release
+/ui/android/.gradle/
+/ui/android/build/
+/ui/ios/Pods/
+/ui/ios/.symlinks/
+/ui/macos/Flutter/ephemeral/
+/ui/windows/flutter/ephemeral/
+/ui/linux/flutter/ephemeral/
+/ui/web/
+/ui/.pubspec.lock
+
+# General build & logs
+*.log
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Environment & secrets
+.env
+.env.local
+*.key
+*.pem
+credentials.json
+
+# IDE & editor files
+.vscode/
+.idea/
+*.iml
+*.sublime-*
+*.vscode
+*.history
+
+# Temporary & cache
+tmp/
+temp/
+.cache/
+**/node_modules/  # in case any JS tools are added later
+
+# Docker & containers
+.docker/
+*.dockerignore
+
+# Documentation & coverage
+coverage/
+*.prof
