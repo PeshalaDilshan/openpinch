@@ -1,0 +1,8 @@
+# core/crates/tools/Cargo.toml
+[package]
+name = "openpinch-tools"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+openpinch-common = { path = "../common" }

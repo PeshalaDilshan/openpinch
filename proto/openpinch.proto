@@ -1,0 +1,46 @@
+// proto/openpinch.proto
+syntax = "proto3";
+
+package openpinch;
+
+option go_package = "github.com/YOUR_USERNAME/openpinch/proto";
+option java_package = "com.openpinch.proto";
+
+// Main service used by Rust core ↔ Go gateway ↔ future UI
+service AgentService {
+  // Execute a tool/skill in the sandbox
+  rpc ExecuteTool(ToolRequest) returns (ToolResponse);
+
+  // Get agent status
+  rpc GetStatus(Empty) returns (StatusResponse);
+
+  // Send message from external platform
+  rpc HandleMessage(MessageRequest) returns (Empty);
+}
+
+message Empty {}
+
+message ToolRequest {
+  string tool_name = 1;
+  string parameters = 2;  // JSON string
+  string skill_id = 3;
+}
+
+message ToolResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message StatusResponse {
+  string status = 1;
+  string version = 2;
+  int64 uptime_seconds = 3;
+}
+
+message MessageRequest {
+  string platform = 1;      // "whatsapp", "telegram", etc.
+  string sender = 2;
+  string content = 3;
+  string chat_id = 4;
+}

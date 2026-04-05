@@ -1,0 +1,10 @@
+# core/crates/engine/Cargo.toml
+[package]
+name = "openpinch-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+openpinch-common = { path = "../common" }
+tokio.workspace = true
+tracing.workspace = true

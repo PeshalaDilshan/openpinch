@@ -1,0 +1,9 @@
+# core/crates/sandbox/Cargo.toml
+[package]
+name = "openpinch-sandbox"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+openpinch-common = { path = "../common" }
+tracing.workspace = true

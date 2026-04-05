@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  core:
+    build: ./core
+    volumes:
+      - ./core:/app
+    depends_on:
+      - gateway
+
+  gateway:
+    build: ./gateway
+    ports:
+      - "50051:50051"
+    volumes:
+      - ./gateway:/app
+
+  # UI will be added later

@@ -1,0 +1,11 @@
+{
+  "skills": [
+    {
+      "id": "example-web-search",
+      "name": "Web Search",
+      "description": "Search the internet",
+      "language": "rust",
+      "verified": true
+    }
+  ]
+}
