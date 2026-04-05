@@ -3,7 +3,7 @@ syntax = "proto3";
 
 package openpinch;
 
-option go_package = "github.com/YOUR_USERNAME/openpinch/proto";
+option go_package = "github.com/PeshalaDilshan/openpinch/proto";
 option java_package = "com.openpinch.proto";
 
 // Main service used by Rust core ↔ Go gateway ↔ future UI

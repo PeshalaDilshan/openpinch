@@ -6,3 +6,5 @@ edition.workspace = true
 
 [dependencies]
 openpinch-common = { path = "../common" }
+openpinch-sandbox = { path = "../sandbox" }
+tokio.workspace = true

@@ -1,13 +1,19 @@
 // core/crates/engine/src/lib.rs
-pub mod memory;
-pub mod decision;
+use openpinch_tools::ToolExecutor;
+use tracing::info;
 
 pub struct Engine {
-    // TODO: Add vector memory, planner, etc.
+    tools: ToolExecutor,
 }
 
 impl Engine {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(tools: ToolExecutor) -> Self {
+        Self { tools }
+    }
+
+    pub async fn run(&mut self) -> anyhow::Result<()> {
+        info!("🧠 OpenPinch Decision Engine started");
+        // TODO: Add planner, memory, autonomous loop here
+        Ok(())
     }
 }

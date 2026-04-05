@@ -1,15 +1,39 @@
 // core/src/main.rs
-use tracing::info;
+use anyhow::Result;
+use openpinch_engine::Engine;
+use openpinch_sandbox::FirecrackerSandbox;
+use openpinch_tools::ToolExecutor;
+use std::sync::Arc;
+use tokio::signal;
+use tracing::{info, warn};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
-    info!("🚀 OpenPinch Rust Core starting...");
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter("openpinch=info")
+        .init();
 
-    // TODO: Connect to Go gateway via gRPC
-    // TODO: Load engine, sandbox, etc.
+    info!("🚀 OpenPinch Rust Core v0.1.0 starting...");
 
-    info!("OpenPinch Core is running. Press Ctrl+C to stop.");
-    tokio::signal::ctrl_c().await?;
+    // Initialize components
+    let sandbox = Arc::new(FirecrackerSandbox::new().await?);
+    let tools = ToolExecutor::new(sandbox.clone());
+    let mut engine = Engine::new(tools);
+
+    info!("✅ Core components initialized (Rust engine + Firecracker sandbox)");
+
+    // TODO: Connect to Go gateway via gRPC (will be added in next step)
+    // For now we run the engine in background
+    tokio::spawn(async move {
+        if let Err(e) = engine.run().await {
+            warn!("Engine stopped with error: {}", e);
+        }
+    });
+
+    info!("🎉 OpenPinch Core is fully running and ready!");
+    info!("Press Ctrl+C to stop.");
+
+    signal::ctrl_c().await?;
+    info!("Shutting down gracefully...");
     Ok(())
 }

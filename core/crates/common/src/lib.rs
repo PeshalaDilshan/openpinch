@@ -1,2 +1,4 @@
 // core/crates/common/src/lib.rs
 pub mod types;
+
+pub use types::*;
