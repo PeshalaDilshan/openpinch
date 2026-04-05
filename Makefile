@@ -1,72 +1,39 @@
-# ================================================
-# OpenPinch Makefile
-# One-stop build & dev commands for Rust + Go + Flutter
-# ================================================
+.PHONY: help setup dev build test clean release cli
 
-.PHONY: help setup dev build test clean release
-
-# Default target
 help:
-	@echo "OpenPinch - Autonomous AI Agent"
-	@echo "Available commands:"
-	@echo "  make setup     - Install dependencies and tooling"
-	@echo "  make dev       - Run development mode (core + gateway + Flutter hot reload)"
-	@echo "  make build     - Build all components"
-	@echo "  make test      - Run tests for all languages"
-	@echo "  make clean     - Clean build artifacts"
-	@echo "  make release   - Prepare release binaries"
+	@echo "OpenPinch — Autonomous AI Agent"
+	@echo "Commands:"
+	@echo "  make setup     Install Rust, Go, Flutter tooling"
+	@echo "  make dev       Run everything in development"
+	@echo "  make build     Build core + gateway + CLI"
+	@echo "  make cli       Build only the CLI binary"
+	@echo "  make test      Run all tests"
 
-# Setup tooling (run once)
 setup:
-	@echo "Setting up OpenPinch..."
-	# Rust
 	rustup update
-	cargo --version || (echo "Please install Rust from https://rustup.rs" && exit 1)
-	# Go
-	go version || (echo "Please install Go from https://go.dev" && exit 1)
-	# Flutter
-	flutter --version || (echo "Please install Flutter from https://flutter.dev" && exit 1)
-	flutter pub get --directory=ui
-	@echo "Setup complete! Run 'make dev' to start development."
+	go mod download -C gateway
+	@echo "✅ Setup complete"
 
-# Development mode (parallel where possible)
 dev:
-	@echo "Starting OpenPinch in development mode..."
-	@echo "→ Rust core will need manual cargo run in another terminal for now"
-	@echo "→ Go gateway: cd gateway && go run ./cmd/gateway"
-	@echo "→ Flutter UI: cd ui && flutter run -d chrome"  # or your preferred device
-	# For better parallel dev, consider using tmux or overmind in the future
+	@echo "→ Run CLI: cargo run -p openpinch-cli -- start"
+	@echo "→ Or use: openpinch start (after build)"
 
-# Build everything
 build:
-	@echo "Building OpenPinch..."
-	# Rust core
-	cargo build --release --manifest-path core/Cargo.toml
-	# Go gateway
+	cargo build --release
 	cd gateway && go build -o ../bin/gateway ./cmd/gateway
-	# Flutter UI (desktop + web for starters)
-	cd ui && flutter build web
-	cd ui && flutter build macos  # or windows, linux depending on host
-	@echo "Build complete! Binaries in ./bin/ and ui/build/"
+	@echo "✅ Built: target/release/openpinch (CLI) + gateway binary"
 
-# Run tests
+cli:
+	cargo build -p openpinch-cli --release
+	@echo "✅ CLI binary ready → ./target/release/openpinch"
+
 test:
-	@echo "Running tests..."
-	cargo test --manifest-path core/Cargo.toml
-	cd gateway && go test ./...
-	cd ui && flutter test
-	@echo "All tests completed."
+	cargo test
 
-# Clean artifacts
 clean:
-	cargo clean --manifest-path core/Cargo.toml
+	cargo clean
 	rm -rf gateway/bin/
-	rm -rf ui/build/
 	rm -rf target/
-	@echo "Cleaned build artifacts."
 
-# Release preparation (expand later with packaging)
 release: clean build
-	@echo "Preparing release..."
-	# Add packaging steps here (e.g., zip binaries, create installer)
-	@echo "Release artifacts ready."
+	@echo "Release artifacts ready"

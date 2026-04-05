@@ -1,0 +1,24 @@
+[package]
+name = "openpinch-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Command-line interface for OpenPinch autonomous AI agent"
+
+[[bin]]
+name = "openpinch"
+path = "src/main.rs"
+
+[dependencies]
+openpinch-engine = { path = "../core/crates/engine" }
+openpinch-sandbox = { path = "../core/crates/sandbox" }
+openpinch-tools = { path = "../core/crates/tools" }
+openpinch-common = { path = "../core/crates/common" }
+
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1.0"
+anyhow = "1.0"
