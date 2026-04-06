@@ -320,7 +320,7 @@ fn default_gateway_binary() -> String {
     "./bin/openpinch-gateway".to_owned()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GatewayTlsConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -332,18 +332,6 @@ pub struct GatewayTlsConfig {
     pub client_ca_file: String,
     #[serde(default)]
     pub rotate_on_start: bool,
-}
-
-impl Default for GatewayTlsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            cert_file: String::new(),
-            key_file: String::new(),
-            client_ca_file: String::new(),
-            rotate_on_start: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -609,18 +597,10 @@ fn default_priority() -> String {
     "interactive".to_owned()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RuntimeConfig {
     #[serde(default)]
     pub queues: QueueRuntimeConfig,
-}
-
-impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self {
-            queues: QueueRuntimeConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -683,7 +663,7 @@ fn default_token_budget() -> u64 {
     200_000
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SecurityConfig {
     #[serde(default)]
     pub encryption: EncryptionConfig,
@@ -691,16 +671,6 @@ pub struct SecurityConfig {
     pub attestation: AttestationConfig,
     #[serde(default)]
     pub audit: AuditConfig,
-}
-
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            encryption: EncryptionConfig::default(),
-            attestation: AttestationConfig::default(),
-            audit: AuditConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -867,7 +837,7 @@ fn default_role_bindings() -> BTreeMap<String, Vec<String>> {
     bindings
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SiemConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -877,17 +847,6 @@ pub struct SiemConfig {
     pub syslog_endpoint: String,
     #[serde(default)]
     pub https_batch_endpoint: String,
-}
-
-impl Default for SiemConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            ocsf_file: String::new(),
-            syslog_endpoint: String::new(),
-            https_batch_endpoint: String::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

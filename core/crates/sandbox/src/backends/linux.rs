@@ -7,7 +7,7 @@ use serde::Serialize;
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tokio::process::Command;
 use tokio::time::{Duration, sleep, timeout};
@@ -233,7 +233,7 @@ impl From<SandboxCommand> for GuestPayload {
     }
 }
 
-async fn wait_for_socket(path: &PathBuf) -> Result<()> {
+async fn wait_for_socket(path: &Path) -> Result<()> {
     for _ in 0..100 {
         if path.exists() {
             return Ok(());
@@ -247,7 +247,7 @@ async fn wait_for_socket(path: &PathBuf) -> Result<()> {
     )
 }
 
-fn firecracker_request(socket: &PathBuf, method: &str, path: &str, body: &str) -> Result<()> {
+fn firecracker_request(socket: &Path, method: &str, path: &str, body: &str) -> Result<()> {
     let mut stream = UnixStream::connect(socket).with_context(|| {
         format!(
             "failed to connect to Firecracker socket {}",
