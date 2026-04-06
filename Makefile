@@ -1,39 +1,32 @@
-.PHONY: help setup dev build test clean release cli
+SHELL := /bin/bash
+ROOT_DIR := $(CURDIR)
+GO_CACHE := $(ROOT_DIR)/.cache/go-build
+GO_MOD_CACHE := $(ROOT_DIR)/.cache/go-mod
 
-help:
-	@echo "OpenPinch — Autonomous AI Agent"
-	@echo "Commands:"
-	@echo "  make setup     Install Rust, Go, Flutter tooling"
-	@echo "  make dev       Run everything in development"
-	@echo "  make build     Build core + gateway + CLI"
-	@echo "  make cli       Build only the CLI binary"
-	@echo "  make test      Run all tests"
+.PHONY: setup dev build cli test clean release
 
 setup:
-	rustup update
-	go mod download -C gateway
-	@echo "✅ Setup complete"
+	./scripts/setup.sh
 
 dev:
-	@echo "→ Run CLI: cargo run -p openpinch-cli -- start"
-	@echo "→ Or use: openpinch start (after build)"
+	. "$$HOME/.cargo/env" 2>/dev/null || true; cargo run -p openpinch-cli -- start --foreground
 
 build:
-	cargo build --release
-	cd gateway && go build -o ../bin/gateway ./cmd/gateway
-	@echo "✅ Built: target/release/openpinch (CLI) + gateway binary"
+	. "$$HOME/.cargo/env" 2>/dev/null || true; cargo build --workspace --release
+	cd gateway && GOCACHE="$(GO_CACHE)" GOMODCACHE="$(GO_MOD_CACHE)" go build -o ../bin/openpinch-gateway ./cmd/gateway
 
 cli:
-	cargo build -p openpinch-cli --release
-	@echo "✅ CLI binary ready → ./target/release/openpinch"
+	. "$$HOME/.cargo/env" 2>/dev/null || true; cargo build -p openpinch-cli --release
 
 test:
-	cargo test
+	. "$$HOME/.cargo/env" 2>/dev/null || true; cargo test --workspace
+	cd gateway && GOCACHE="$(GO_CACHE)" GOMODCACHE="$(GO_MOD_CACHE)" go test ./...
 
 clean:
-	cargo clean
-	rm -rf gateway/bin/
-	rm -rf target/
+	. "$$HOME/.cargo/env" 2>/dev/null || true; cargo clean
+	rm -rf .cache bin gateway/bin target
 
 release: clean build
-	@echo "Release artifacts ready"
+	@echo "Artifacts:"
+	@echo "  CLI: $(ROOT_DIR)/target/release/openpinch"
+	@echo "  Gateway: $(ROOT_DIR)/bin/openpinch-gateway"

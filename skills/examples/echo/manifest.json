@@ -1,0 +1,14 @@
+{
+  "id": "echo-skill",
+  "version": "0.1.0",
+  "name": "Echo Skill",
+  "description": "A signed example skill that echoes a message payload.",
+  "language": "shell",
+  "entrypoint": "run.sh",
+  "files": [
+    {
+      "path": "run.sh",
+      "sha256": "309ea051ab979d1170bbe791e44fc25d1dd726eb81b3b6bff56ff29c9971be13"
+    }
+  ]
+}

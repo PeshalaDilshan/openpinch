@@ -1,27 +1,56 @@
-# openpinch/Cargo.toml
 [workspace]
 members = [
     "cli",
     "core/crates/common",
     "core/crates/engine",
     "core/crates/sandbox",
-    "core/crates/tools"
+    "core/crates/tools",
 ]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
-authors = ["Your Name <you@example.com>"]
+edition = "2024"
+rust-version = "1.85"
+authors = ["Peshala Dilshan <opensource@openpinch.dev>"]
 license = "MIT"
 repository = "https://github.com/PeshalaDilshan/openpinch"
+homepage = "https://github.com/PeshalaDilshan/openpinch"
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+async-trait = "0.1"
+base64ct = { version = "1.6", features = ["alloc"] }
+chrono = { version = "0.4", features = ["clock", "serde"] }
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+directories = "5.0"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+futures = "0.3"
+humantime-serde = "1.1"
+parking_lot = "0.12"
+prost = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-anyhow = "1.0"
-uuid = { version = "1.11", features = ["v4"] }
-reqwest = { version = "0.12", features = ["json"] }
+sha2 = "0.10"
+tar = "0.4"
+tempfile = "3.15"
+thiserror = "2.0"
+tokio = { version = "1.44", features = ["fs", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util = "0.7"
+toml = "0.8"
+tonic = { version = "0.12", features = ["transport"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1.13", features = ["serde", "v4"] }
+walkdir = "2.5"
+which = "7.0"
+zstd = "0.13"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

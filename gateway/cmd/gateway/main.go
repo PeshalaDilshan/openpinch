@@ -1,35 +1,71 @@
-// gateway/cmd/gateway/main.go
 package main
 
 import (
-    "log"
-    "net"
+	"context"
+	"log"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
 
-    "google.golang.org/grpc"
-    pb "github.com/PeshalaDilshan/openpinch/proto"
+	"github.com/PeshalaDilshan/openpinch/gateway/internal/config"
+	"github.com/PeshalaDilshan/openpinch/gateway/internal/connectors"
+	"github.com/PeshalaDilshan/openpinch/gateway/internal/enginebridge"
+	"github.com/PeshalaDilshan/openpinch/gateway/internal/scheduler"
+	"github.com/PeshalaDilshan/openpinch/gateway/internal/server"
+	"google.golang.org/grpc"
 )
 
-type server struct {
-    pb.UnimplementedAgentServiceServer
-}
-
-func (s *server) ExecuteTool(req *pb.ToolRequest, stream pb.AgentService_ExecuteToolServer) error {
-    log.Printf("Executing tool: %s", req.ToolName)
-    // TODO: Call Rust core via gRPC or internal channel
-    return nil
-}
-
 func main() {
-    lis, err := net.Listen("tcp", ":50051")
-    if err != nil {
-        log.Fatalf("failed to listen: %v", err)
-    }
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
 
-    s := grpc.NewServer()
-    pb.RegisterAgentServiceServer(s, &server{})
+	bridge, err := enginebridge.New(cfg.Gateway.EngineEndpoint)
+	if err != nil {
+		log.Fatalf("engine bridge: %v", err)
+	}
+	defer bridge.Close()
 
-    log.Println("🚀 OpenPinch Go Gateway listening on :50051")
-    if err := s.Serve(lis); err != nil {
-        log.Fatalf("failed to serve: %v", err)
-    }
+	sched := scheduler.New(bridge)
+	sched.Start()
+	defer sched.Stop()
+
+	service, err := server.New(cfg, bridge, sched)
+	if err != nil {
+		log.Fatalf("gateway server: %v", err)
+	}
+
+	grpcServer := grpc.NewServer()
+	if err := service.Register(grpcServer); err != nil {
+		log.Fatalf("register gateway service: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", cfg.Gateway.ListenAddress)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+
+	registry := connectors.NewRegistry(cfg, bridge)
+	go func() {
+		if err := registry.Start(context.Background()); err != nil {
+			log.Printf("connector registry stopped: %v", err)
+		}
+	}()
+
+	log.Printf("OpenPinch gateway listening on %s", cfg.Gateway.ListenAddress)
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-signals
+		log.Printf("gateway shutting down")
+		registry.Stop()
+		grpcServer.GracefulStop()
+	}()
+
+	if err := grpcServer.Serve(listener); err != nil {
+		log.Fatalf("grpc serve: %v", err)
+	}
 }

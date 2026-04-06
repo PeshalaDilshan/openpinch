@@ -1,0 +1,14 @@
+{
+  "version": "2026.04.06",
+  "skills": [
+    {
+      "id": "echo-skill",
+      "version": "0.1.0",
+      "name": "Echo Skill",
+      "description": "A signed example skill that echoes a message payload.",
+      "language": "shell",
+      "entrypoint": "run.sh",
+      "source": "skills/examples/echo.skill"
+    }
+  ]
+}

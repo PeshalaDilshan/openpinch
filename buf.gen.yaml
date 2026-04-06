@@ -1,0 +1,13 @@
+version: v1
+plugins:
+  - plugin: buf.build/protocolbuffers/go
+    out: gateway/pkg/pb
+    opt:
+      - paths=source_relative
+  - plugin: buf.build/grpc/go
+    out: gateway/pkg/pb
+    opt:
+      - paths=source_relative
+  - plugin: buf.build/protocolbuffers/rust
+    out: target/buf/rust
+

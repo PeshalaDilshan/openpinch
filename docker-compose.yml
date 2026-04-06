@@ -1,18 +1,30 @@
-version: '3.8'
+version: "3.9"
 
 services:
-  core:
-    build: ./core
+  ollama:
+    image: ollama/ollama:latest
+    container_name: openpinch-ollama
+    ports:
+      - "11434:11434"
     volumes:
-      - ./core:/app
-    depends_on:
-      - gateway
+      - ollama-data:/root/.ollama
 
   gateway:
-    build: ./gateway
+    image: golang:1.26
+    container_name: openpinch-gateway-dev
+    working_dir: /workspace/gateway
+    command: ["go", "run", "./cmd/gateway"]
+    environment:
+      OPENPINCH_CONFIG_PATH: /workspace/.openpinch/config.toml
+      GOCACHE: /workspace/.cache/go-build
+      GOMODCACHE: /workspace/.cache/go-mod
     ports:
       - "50051:50051"
     volumes:
-      - ./gateway:/app
+      - ./:/workspace
+    depends_on:
+      - ollama
 
-  # UI will be added later
+volumes:
+  ollama-data:
+

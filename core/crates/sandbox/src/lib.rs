@@ -1,61 +1,82 @@
-// core/crates/sandbox/src/lib.rs
-use anyhow::{Context, Result};
-use openpinch_common::ToolResponse;
-use std::process::Command;
-use tracing::{error, info};
+pub mod backends;
 
-pub struct FirecrackerSandbox {
-    firecracker_path: String,
-    jailer_path: String,
+use anyhow::Result;
+use async_trait::async_trait;
+use backends::{
+    linux::LinuxFirecrackerBackend, macos::MacOsVirtualizationBackend,
+    windows::WindowsHyperVBackend,
+};
+use openpinch_common::{OpenPinchPaths, SandboxConfig};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub allow_network: bool,
+    pub workspace_archive_b64: Option<String>,
 }
 
-impl FirecrackerSandbox {
-    pub async fn new() -> Result<Self> {
-        // Check if Firecracker is available
-        let firecracker_path = which::which("firecracker").unwrap_or_else(|_| "/usr/local/bin/firecracker".into());
-        let jailer_path = which::which("jailer").unwrap_or_else(|_| "/usr/local/bin/jailer".into());
-
-        info!("🔒 Firecracker Sandbox initialized");
-        info!("   Firecracker: {}", firecracker_path);
-        info!("   Jailer: {}", jailer_path);
-
-        Ok(Self { firecracker_path, jailer_path })
-    }
-
-    /// Execute a tool inside a brand-new Firecracker microVM (kernel-level isolation)
-    pub async fn execute(&self, tool_name: &str, params: serde_json::Value) -> Result<ToolResponse> {
-        let vm_id = uuid::Uuid::new_v4().to_string();
-
-        info!("🛡️  Starting Firecracker microVM {} for tool: {}", vm_id, tool_name);
-
-        // In a real implementation we would:
-        // 1. Create a minimal rootfs + kernel
-        // 2. Spawn jailer + firecracker
-        // For this starter we simulate the execution (replace with real spawn in next iteration)
-
-        // Placeholder real execution (you can replace with actual process::Command)
-        let result = format!("Tool '{}' executed inside Firecracker VM {}", tool_name, vm_id);
-
-        Ok(ToolResponse {
-            success: true,
-            result,
-            error: None,
-        })
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxOutput {
+    pub success: bool,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub logs: Vec<String>,
 }
 
-use std::path::Path;
-fn which(cmd: &str) -> std::path::PathBuf {
-    Command::new("which")
-        .arg(cmd)
-        .output()
-        .ok()
-        .and_then(|out| {
-            if out.status.success() {
-                Some(String::from_utf8_lossy(&out.stdout).trim().into())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| cmd.into())
+#[derive(Debug, Clone)]
+pub struct SandboxHealth {
+    pub backend: String,
+    pub missing_prerequisites: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SandboxPaths {
+    pub workspace_dir: PathBuf,
+}
+
+#[async_trait]
+pub trait SandboxBackend: Send + Sync {
+    fn name(&self) -> &str;
+    fn health(&self) -> SandboxHealth;
+    async fn execute(&self, command: SandboxCommand) -> Result<SandboxOutput>;
+}
+
+#[derive(Clone)]
+pub struct SandboxManager {
+    backend: Arc<dyn SandboxBackend>,
+}
+
+impl SandboxManager {
+    pub fn from_config(config: &SandboxConfig, paths: &OpenPinchPaths) -> Result<Self> {
+        let sandbox_paths = SandboxPaths {
+            workspace_dir: paths.runtime_dir.join("sandbox"),
+        };
+
+        let backend: Arc<dyn SandboxBackend> = if cfg!(target_os = "linux") {
+            Arc::new(LinuxFirecrackerBackend::new(config.clone(), sandbox_paths)?)
+        } else if cfg!(target_os = "macos") {
+            Arc::new(MacOsVirtualizationBackend::new(
+                config.clone(),
+                sandbox_paths,
+            ))
+        } else {
+            Arc::new(WindowsHyperVBackend::new(config.clone(), sandbox_paths))
+        };
+
+        Ok(Self { backend })
+    }
+
+    pub fn health(&self) -> SandboxHealth {
+        self.backend.health()
+    }
+
+    pub async fn execute(&self, command: SandboxCommand) -> Result<SandboxOutput> {
+        self.backend.execute(command).await
+    }
 }
