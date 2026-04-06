@@ -139,11 +139,11 @@ impl EngineRuntime {
                 result
             });
 
-            return Ok(EngineHandle {
+            Ok(EngineHandle {
                 endpoint,
                 join,
                 shutdown,
-            });
+            })
         }
 
         #[cfg(not(unix))]
@@ -1113,13 +1113,7 @@ impl Orchestrator {
         providers: ProviderRegistry,
         encryption: EncryptionManager,
     ) -> Self {
-        let vector_backend = if config.vector_memory.requested_backend == "lancedb"
-            && !config.vector_memory.lancedb_uri.is_empty()
-        {
-            "sqlite-fallback".to_owned()
-        } else {
-            "sqlite-fallback".to_owned()
-        };
+        let vector_backend = "sqlite-fallback".to_owned();
         Self {
             inflight: Arc::new(Semaphore::new(config.orchestration.max_inflight.max(1))),
             config,
@@ -1633,14 +1627,11 @@ fn detect_hardware_attestation(config: &AppConfig) -> bool {
     if !config.security.attestation.enabled {
         return false;
     }
+
     if cfg!(target_os = "linux") {
         Path::new(&config.security.attestation.tpm_device).exists()
-    } else if cfg!(target_os = "macos") {
-        true
-    } else if cfg!(target_os = "windows") {
-        true
     } else {
-        false
+        cfg!(target_os = "macos") || cfg!(target_os = "windows")
     }
 }
 

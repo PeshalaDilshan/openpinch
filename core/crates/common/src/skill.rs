@@ -71,7 +71,7 @@ pub struct VerifiedSkillBundle {
 
 pub fn load_trust_root(path: &Path) -> Result<TrustRoot> {
     let raw = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(serde_json::from_slice(&raw).context("failed to parse trust root")?)
+    serde_json::from_slice(&raw).context("failed to parse trust root")
 }
 
 pub fn verify_registry(
@@ -84,7 +84,7 @@ pub fn verify_registry(
         fs::read(index_path).with_context(|| format!("failed to read {}", index_path.display()))?;
     let signature = read_signature(signature_path)?;
     verify_bytes(&payload, &signature, &root)?;
-    Ok(serde_json::from_slice(&payload).context("failed to parse registry index")?)
+    serde_json::from_slice(&payload).context("failed to parse registry index")
 }
 
 pub fn verify_skill_bundle(path: &Path, root_path: &Path) -> Result<VerifiedSkillBundle> {
@@ -156,7 +156,7 @@ fn copy_directory(from: &Path, to: &Path) -> Result<()> {
 
 fn read_signature(path: &Path) -> Result<SignatureEnvelope> {
     let raw = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(serde_json::from_slice(&raw).context("failed to parse signature envelope")?)
+    serde_json::from_slice(&raw).context("failed to parse signature envelope")
 }
 
 fn verify_bytes(payload: &[u8], signature: &SignatureEnvelope, root: &TrustRoot) -> Result<()> {
