@@ -1,0 +1,64 @@
+name: ci-flutter
+
+on:
+  push:
+    branches:
+      - dev
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ci-flutter-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flutter:
+    name: Flutter Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect Flutter UI
+        id: detect
+        shell: bash
+        run: |
+          if [[ -f ui/pubspec.yaml ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip Until UI Exists
+        if: steps.detect.outputs.present != 'true'
+        run: echo "No Flutter UI committed yet. Workflow passes in placeholder mode."
+
+      - name: Install Flutter
+        if: steps.detect.outputs.present == 'true'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Resolve Dependencies
+        if: steps.detect.outputs.present == 'true'
+        working-directory: ui
+        run: flutter pub get
+
+      - name: Analyze
+        if: steps.detect.outputs.present == 'true'
+        working-directory: ui
+        run: flutter analyze
+
+      - name: Test
+        if: steps.detect.outputs.present == 'true'
+        working-directory: ui
+        run: flutter test
+
+      - name: Build
+        if: steps.detect.outputs.present == 'true'
+        working-directory: ui
+        run: flutter build web --release

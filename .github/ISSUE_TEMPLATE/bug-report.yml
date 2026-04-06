@@ -1,0 +1,93 @@
+name: Bug Report
+description: Report a regression, defect, or broken workflow in OpenPinch
+title: "[bug] "
+labels:
+  - type/bug
+  - status/needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for defects in runtime behavior, gateway behavior, sandbox enforcement, docs, or UI work.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which subsystem is primarily affected?
+      options:
+        - core-rust
+        - gateway-go
+        - security
+        - docs
+        - ui
+        - cross-cutting
+    validations:
+      required: true
+
+  - type: dropdown
+    id: branch
+    attributes:
+      label: Branch Impact
+      description: Where is this issue visible?
+      options:
+        - main
+        - dev
+        - test
+        - unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the bug clearly and directly.
+      placeholder: The runtime fails to start when...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps To Reproduce
+      description: Provide a minimal reproduction path.
+      placeholder: |
+        1. Run ...
+        2. Configure ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs Or Screenshots
+      description: Paste relevant logs, traces, or screenshots.
+      render: shell
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, architecture, branch, and relevant local model/sandbox details.
+      placeholder: |
+        OS: Ubuntu 24.04
+        Branch: dev
+        Rust: 1.94.1
+        Go: 1.26.1
+        Sandbox: linux-firecracker

@@ -22,6 +22,7 @@ The stack is split deliberately:
 - Zero-trust gateway options: mTLS, per-channel allowlists, attestation reporting, audit export
 - Formal protocol spec support for multi-agent handoff flows
 - Structured logging, local SQLite state, graceful shutdown, and deterministic setup scripts
+- Branch-aware CI with `dev -> main` promotion automation and separate Rust/Go/Flutter workflows
 
 ## Repository Layout
 
@@ -90,6 +91,22 @@ make build
 make test
 ```
 
+Branch model:
+
+- `main` is the stable branch.
+- `dev` is the active integration branch.
+- `test` is the experimental patch branch.
+
+Promotion model:
+
+1. Land work in `dev`.
+2. CI runs on `dev`.
+3. Automation opens or updates a `dev -> main` PR.
+4. CI runs again on the PR into `main`.
+5. Merges into `main` produce release artifacts.
+
+Important: direct pushes to `main` must be blocked with GitHub branch protection. Workflow YAML can validate and promote, but it cannot replace repository protection rules.
+
 Useful commands:
 
 ```bash
@@ -106,6 +123,10 @@ openpinch logs --tail 100
 
 - [Setup](docs/setup.md)
 - [Architecture](docs/architecture.md)
+- [Branching And CI](docs/branching-and-ci.md)
+- [Ownership](docs/ownership.md)
+- [Maintainers](MAINTAINERS.md)
+- [Issue And Triage Metadata](.github/labels.json)
 - [Sandbox](docs/sandbox.md)
 - [Skills](docs/skills.md)
 - [Formal Protocols](docs/formal/handoff_v1.tla)

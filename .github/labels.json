@@ -1,0 +1,77 @@
+[
+  {
+    "name": "area/core-rust",
+    "color": "0e8a16",
+    "description": "Rust CLI, common crate, engine, tools, and proto bindings"
+  },
+  {
+    "name": "area/gateway-go",
+    "color": "1d76db",
+    "description": "Go gateway, connectors, scheduler, and operator scaffolding"
+  },
+  {
+    "name": "area/security",
+    "color": "b60205",
+    "description": "Sandbox, policy, encryption, attestation, audit, and zero-trust changes"
+  },
+  {
+    "name": "area/docs",
+    "color": "5319e7",
+    "description": "Documentation, migration guidance, and contributor content"
+  },
+  {
+    "name": "area/ui",
+    "color": "c5def5",
+    "description": "Flutter UI and future frontend assets"
+  },
+  {
+    "name": "type/bug",
+    "color": "d73a4a",
+    "description": "Something is broken or regressed"
+  },
+  {
+    "name": "type/feature",
+    "color": "a2eeef",
+    "description": "New feature or capability request"
+  },
+  {
+    "name": "type/docs",
+    "color": "0075ca",
+    "description": "Documentation or guidance update"
+  },
+  {
+    "name": "type/connector",
+    "color": "7057ff",
+    "description": "Connector support, adapter request, or integration gap"
+  },
+  {
+    "name": "status/needs-triage",
+    "color": "fbca04",
+    "description": "New issue waiting for maintainer or owner triage"
+  },
+  {
+    "name": "status/needs-owner",
+    "color": "d93f0b",
+    "description": "Needs direct owner review because the area is sensitive or cross-cutting"
+  },
+  {
+    "name": "status/blocked",
+    "color": "000000",
+    "description": "Blocked on another issue, dependency, or maintainer decision"
+  },
+  {
+    "name": "priority/p0",
+    "color": "b60205",
+    "description": "Critical breakage affecting stability or security"
+  },
+  {
+    "name": "priority/p1",
+    "color": "d93f0b",
+    "description": "High-priority issue that should be addressed soon"
+  },
+  {
+    "name": "priority/p2",
+    "color": "fbca04",
+    "description": "Normal priority work"
+  }
+]

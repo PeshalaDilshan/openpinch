@@ -1,0 +1,65 @@
+name: Feature Request
+description: Propose a new capability, improvement, or product enhancement
+title: "[feature] "
+labels:
+  - type/feature
+  - status/needs-triage
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which subsystem should own this feature?
+      options:
+        - core-rust
+        - gateway-go
+        - security
+        - docs
+        - ui
+        - cross-cutting
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What gap or pain point does this feature solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution you want to see.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Note any alternatives or tradeoffs already considered.
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: What would make this issue complete?
+      placeholder: |
+        - CLI exposes ...
+        - Docs explain ...
+        - Tests cover ...
+
+  - type: dropdown
+    id: sensitivity
+    attributes:
+      label: Security Or Stability Sensitivity
+      description: Does this change affect sandboxing, policy, release flow, or public APIs?
+      options:
+        - no
+        - yes
+        - unknown
+    validations:
+      required: true

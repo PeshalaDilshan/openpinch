@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Contributing Guide
+    url: https://github.com/PeshalaDilshan/openpinch/blob/main/CONTRIBUTING.md
+    about: Read the branch flow, testing expectations, and contribution standards before filing work.
+  - name: Ownership And Review Policy
+    url: https://github.com/PeshalaDilshan/openpinch/blob/main/docs/ownership.md
+    about: See which subsystem owners and maintainers are responsible for triage and review.

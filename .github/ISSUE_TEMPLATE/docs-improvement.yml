@@ -1,0 +1,30 @@
+name: Docs Improvement
+description: Report missing, unclear, outdated, or incorrect documentation
+title: "[docs] "
+labels:
+  - type/docs
+  - area/docs
+  - status/needs-triage
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Documentation Gap
+      description: What is unclear, missing, or incorrect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: affected
+    attributes:
+      label: Affected Docs
+      description: Reference specific files, commands, or sections if possible.
+      placeholder: README.md quick start, docs/setup.md branch setup section, ...
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Suggested Improvement
+      description: What should the docs say or explain differently?
+    validations:
+      required: true

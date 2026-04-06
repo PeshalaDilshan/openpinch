@@ -1,0 +1,203 @@
+name: release
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  promote-dev-to-main:
+    name: Promote Dev To Main
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+
+      - name: Cache Rust Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.1"
+          cache-dependency-path: gateway/go.sum
+
+      - name: Detect Flutter UI
+        id: detect_flutter
+        shell: bash
+        run: |
+          if [[ -f ui/pubspec.yaml ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Flutter
+        if: steps.detect_flutter.outputs.present == 'true'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Gate Rust
+        run: cargo test --workspace
+
+      - name: Gate Go
+        working-directory: gateway
+        run: |
+          go test ./...
+          go vet ./...
+
+      - name: Gate Flutter
+        if: steps.detect_flutter.outputs.present == 'true'
+        working-directory: ui
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+          flutter build web --release
+
+      - name: Create Or Update PR From Dev To Main
+        uses: actions/github-script@v7
+        id: sync_pr
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const head = "dev";
+            const base = "main";
+            const title = "Promote dev to main";
+            const body = [
+              "## Automated Promotion",
+              "",
+              "This PR was created automatically after a successful push-to-dev validation run.",
+              "",
+              "### Validation Gate",
+              "- cargo test --workspace",
+              "- go test ./...",
+              "- go vet ./...",
+              "- flutter analyze/test/build when `ui/pubspec.yaml` exists",
+              "",
+              "Direct pushes to `main` should remain blocked with branch protection."
+            ].join("\n");
+
+            const existing = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: "open",
+              head: `${owner}:${head}`,
+              base,
+            });
+
+            let pr;
+            if (existing.data.length > 0) {
+              pr = existing.data[0];
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: pr.number,
+                title,
+                body,
+              });
+            } else {
+              pr = (await github.rest.pulls.create({
+                owner,
+                repo,
+                head,
+                base,
+                title,
+                body,
+                maintainer_can_modify: true,
+              })).data;
+            }
+
+            core.setOutput("pr_number", String(pr.number));
+            core.setOutput("node_id", pr.node_id);
+
+      - name: Enable Auto Merge
+        uses: actions/github-script@v7
+        continue-on-error: true
+        with:
+          script: |
+            const nodeId = `${{ steps.sync_pr.outputs.node_id }}`;
+            if (!nodeId) {
+              core.warning("No PR node id found. Auto-merge step skipped.");
+              return;
+            }
+
+            await github.graphql(
+              `
+              mutation EnableAutoMerge($pullRequestId: ID!) {
+                enablePullRequestAutoMerge(
+                  input: {
+                    pullRequestId: $pullRequestId,
+                    mergeMethod: SQUASH
+                  }
+                ) {
+                  clientMutationId
+                }
+              }
+              `,
+              { pullRequestId: nodeId },
+            );
+
+  build-release:
+    name: Build Release Artifacts
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+
+      - name: Cache Rust Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.1"
+          cache-dependency-path: gateway/go.sum
+
+      - name: Build CLI
+        run: cargo build -p openpinch-cli --release
+
+      - name: Build Gateway
+        working-directory: gateway
+        run: go build -o ../bin/openpinch-gateway ./cmd/gateway
+
+      - name: Upload CLI Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openpinch-cli-linux-amd64
+          path: target/release/openpinch
+
+      - name: Upload Gateway Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openpinch-gateway-linux-amd64
+          path: bin/openpinch-gateway

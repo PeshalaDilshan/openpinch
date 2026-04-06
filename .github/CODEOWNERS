@@ -1,0 +1,47 @@
+# OpenPinch repository ownership
+# Keep this file aligned with docs/ownership.md and GitHub branch protection.
+# Future team layout reference:
+#   core-rust      -> Rust CLI, runtime, proto, tools
+#   gateway-go     -> Go gateway and operator
+#   security       -> sandbox, policy, encryption, attestation, audit
+#   docs           -> docs, guides, migration content
+#   ui             -> Flutter UI
+#
+# Example future pattern after teams exist:
+# /core/crates/engine/ @PeshalaDilshan @openpinch/core-rust
+# /gateway/            @PeshalaDilshan @openpinch/gateway-go
+
+# Default owner of record
+* @PeshalaDilshan
+
+# Repository governance and release flow
+/.github/ @PeshalaDilshan
+/README.md @PeshalaDilshan
+/CONTRIBUTING.md @PeshalaDilshan
+/LICENSE @PeshalaDilshan
+/Makefile @PeshalaDilshan
+/docker-compose.yml @PeshalaDilshan
+/rust-toolchain.toml @PeshalaDilshan
+
+# Rust runtime and CLI
+/Cargo.toml @PeshalaDilshan
+/Cargo.lock @PeshalaDilshan
+/cli/ @PeshalaDilshan
+/core/crates/common/ @PeshalaDilshan
+/core/crates/engine/ @PeshalaDilshan
+/core/crates/tools/ @PeshalaDilshan
+/core/crates/sandbox/ @PeshalaDilshan
+/proto/ @PeshalaDilshan
+
+# Go gateway and operators
+/gateway/ @PeshalaDilshan
+/deploy/operator/ @PeshalaDilshan
+
+# Security-sensitive policy and runtime assets
+/skills/policies/ @PeshalaDilshan
+
+# Product docs, skills, and future UI
+/docs/ @PeshalaDilshan
+/scripts/ @PeshalaDilshan
+/skills/ @PeshalaDilshan
+/ui/ @PeshalaDilshan

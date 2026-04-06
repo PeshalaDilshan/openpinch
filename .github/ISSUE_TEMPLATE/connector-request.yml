@@ -1,0 +1,42 @@
+name: Connector Request
+description: Request a new messaging connector or improvement to an existing one
+title: "[connector] "
+labels:
+  - type/connector
+  - area/gateway-go
+  - status/needs-triage
+body:
+  - type: input
+    id: platform
+    attributes:
+      label: Connector Or Platform
+      description: Which messaging platform is involved?
+      placeholder: Matrix, Mattermost, Signal, WhatsApp Cloud API, ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use Case
+      description: What should OpenPinch do on this platform?
+    validations:
+      required: true
+
+  - type: textarea
+    id: integration
+    attributes:
+      label: Integration Notes
+      description: APIs, auth constraints, rate limits, webhook/polling expectations, or references.
+
+  - type: dropdown
+    id: ownership
+    attributes:
+      label: Related Ownership Area
+      options:
+        - gateway-go
+        - security
+        - docs
+        - cross-cutting
+    validations:
+      required: true
