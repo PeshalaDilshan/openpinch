@@ -46,6 +46,14 @@ impl LinuxFirecrackerBackend {
                 self.config.jailer_path
             ));
         }
+        if self.config.linux.containerd_in_guest
+            && which::which(&self.config.containerd_path).is_err()
+        {
+            missing.push(format!(
+                "containerd binary not found: {}",
+                self.config.containerd_path
+            ));
+        }
         if self.config.kernel_image.is_empty() {
             missing.push("sandbox.kernel_image is not configured".to_owned());
         } else if !PathBuf::from(&self.config.kernel_image).exists() {
@@ -191,6 +199,12 @@ impl SandboxBackend for LinuxFirecrackerBackend {
             logs: vec![
                 format!("sandbox backend: {}", self.name()),
                 format!("vm id: {vm_id}"),
+                format!("subject: {}", command.subject),
+                format!("capabilities: {}", command.capabilities.join(",")),
+                format!(
+                    "containerd_in_guest: {}",
+                    self.config.linux.containerd_in_guest
+                ),
             ],
             stdout,
             stderr,

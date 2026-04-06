@@ -42,7 +42,7 @@ func (s *Scheduler) Schedule(jobID string, spec string, tool string, argumentsJS
 	}
 
 	entryID, err := s.cron.AddFunc(spec, func() {
-		if _, err := s.bridge.RunTool(context.Background(), tool, argumentsJSON, false); err != nil {
+		if _, err := s.bridge.RunTool(context.Background(), tool, argumentsJSON, false, "autonomy"); err != nil {
 			log.Printf("scheduled job %s failed: %v", jobID, err)
 		}
 	})

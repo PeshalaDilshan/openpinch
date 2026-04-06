@@ -15,6 +15,7 @@ import (
 )
 
 type TelegramConnector struct {
+	cfg          *config.Config
 	token        string
 	pollInterval time.Duration
 	client       *http.Client
@@ -23,6 +24,7 @@ type TelegramConnector struct {
 
 func NewTelegram(cfg *config.Config, bridge *enginebridge.Client) Connector {
 	return &TelegramConnector{
+		cfg:          cfg,
 		token:        cfg.Gateway.TelegramBotToken,
 		pollInterval: time.Duration(cfg.Gateway.TelegramPollIntervalSeconds) * time.Second,
 		client:       &http.Client{Timeout: 30 * time.Second},
@@ -36,6 +38,22 @@ func (t *TelegramConnector) Name() string {
 
 func (t *TelegramConnector) Enabled() bool {
 	return t.token != ""
+}
+
+func (t *TelegramConnector) Descriptor() Descriptor {
+	connector := t.cfg.Connectors["telegram"]
+	return Descriptor{
+		Name:        "telegram",
+		Enabled:     t.Enabled(),
+		Implemented: true,
+		Mode:        firstNonEmpty(connector.Mode, "polling"),
+		Health:      healthFor(t.Enabled(), true),
+		Allowlist:   connector.Allowlist,
+		Details: map[string]string{
+			"transport":             "telegram-bot-api",
+			"poll_interval_seconds": fmt.Sprintf("%d", t.cfg.Gateway.TelegramPollIntervalSeconds),
+		},
+	}
 }
 
 func (t *TelegramConnector) Start(ctx context.Context) error {

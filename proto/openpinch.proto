@@ -12,6 +12,15 @@ service GatewayService {
   rpc TailLogs(LogRequest) returns (stream LogChunk);
   rpc SubmitMessage(SubmitMessageRequest) returns (SubmitMessageResponse);
   rpc ScheduleJob(ScheduleJobRequest) returns (ScheduleJobResponse);
+  rpc ListConnectors(Empty) returns (ConnectorListResponse);
+  rpc GetConnectorStatus(ConnectorStatusRequest) returns (ConnectorStatusResponse);
+  rpc AttestSession(AttestationRequest) returns (AttestationResponse);
+  rpc ExportAudit(AuditExportRequest) returns (AuditExportResponse);
+  rpc QueryMemory(MemoryQueryRequest) returns (MemoryQueryResponse);
+  rpc UpsertMemory(MemoryUpsertRequest) returns (MemoryUpsertResponse);
+  rpc RunAgentProtocol(AgentProtocolRequest) returns (AgentProtocolResponse);
+  rpc QueueTask(QueueTaskRequest) returns (QueueTaskResponse);
+  rpc GetPolicyReport(PolicyReportRequest) returns (PolicyReportResponse);
 }
 
 service EngineRuntimeService {
@@ -19,6 +28,13 @@ service EngineRuntimeService {
   rpc RunTool(EngineToolRequest) returns (ExecuteResponse);
   rpc RunSkill(EngineSkillRequest) returns (ExecuteResponse);
   rpc Health(Empty) returns (HealthResponse);
+  rpc QueryMemory(MemoryQueryRequest) returns (MemoryQueryResponse);
+  rpc UpsertMemory(MemoryUpsertRequest) returns (MemoryUpsertResponse);
+  rpc RunAgentProtocol(AgentProtocolRequest) returns (AgentProtocolResponse);
+  rpc AttestSession(AttestationRequest) returns (AttestationResponse);
+  rpc ExportAudit(AuditExportRequest) returns (AuditExportResponse);
+  rpc QueueTask(QueueTaskRequest) returns (QueueTaskResponse);
+  rpc GetPolicyReport(PolicyReportRequest) returns (PolicyReportResponse);
 }
 
 message Empty {}
@@ -34,12 +50,17 @@ message StatusResponse {
   string started_at = 8;
   string data_dir = 9;
   string log_file = 10;
+  string vector_memory_backend = 11;
+  string encryption_state = 12;
+  string audit_mode = 13;
+  string attestation_state = 14;
 }
 
 message ExecuteRequest {
   string target = 1;
   string arguments_json = 2;
   bool allow_network = 3;
+  string priority = 4;
 }
 
 message ExecuteResponse {
@@ -121,6 +142,7 @@ message EngineToolRequest {
   string tool = 1;
   string arguments_json = 2;
   bool allow_network = 3;
+  string priority = 4;
 }
 
 message EngineSkillRequest {
@@ -132,5 +154,149 @@ message HealthResponse {
   string status = 1;
   repeated string missing_prerequisites = 2;
   string sandbox_backend = 3;
+  string vector_memory_backend = 4;
+  string encryption_state = 5;
+  string audit_mode = 6;
 }
 
+message ConnectorInfo {
+  string name = 1;
+  bool enabled = 2;
+  bool implemented = 3;
+  string mode = 4;
+  string health = 5;
+  repeated string allowlist = 6;
+  map<string, string> details = 7;
+}
+
+message ConnectorListResponse {
+  repeated ConnectorInfo connectors = 1;
+}
+
+message ConnectorStatusRequest {
+  string name = 1;
+}
+
+message ConnectorStatusResponse {
+  ConnectorInfo connector = 1;
+}
+
+message AttestationRequest {
+  string subject = 1;
+  string nonce = 2;
+  bool include_hardware = 3;
+}
+
+message AttestationResponse {
+  string status = 1;
+  string subject = 2;
+  string platform = 3;
+  bool hardware_backed = 4;
+  string nonce = 5;
+  string public_key = 6;
+  map<string, string> measurements = 7;
+}
+
+message AuditEvent {
+  string id = 1;
+  string category = 2;
+  string severity = 3;
+  string summary = 4;
+  double anomaly_score = 5;
+  string payload_json = 6;
+  string created_at = 7;
+}
+
+message AuditExportRequest {
+  string sink = 1;
+  uint32 limit = 2;
+}
+
+message AuditExportResponse {
+  bool exported = 1;
+  string format = 2;
+  repeated AuditEvent events = 3;
+}
+
+message MemoryQueryRequest {
+  string namespace = 1;
+  string query = 2;
+  uint32 limit = 3;
+  string filter_json = 4;
+}
+
+message MemoryRecord {
+  string key = 1;
+  string namespace = 2;
+  string content = 3;
+  string metadata_json = 4;
+  double score = 5;
+  string created_at = 6;
+}
+
+message MemoryQueryResponse {
+  repeated MemoryRecord records = 1;
+  string backend = 2;
+}
+
+message MemoryUpsertRequest {
+  string namespace = 1;
+  string key = 2;
+  string content = 3;
+  string metadata_json = 4;
+}
+
+message MemoryUpsertResponse {
+  bool stored = 1;
+  string backend = 2;
+  string digest = 3;
+}
+
+message AgentMessage {
+  string sender = 1;
+  string recipient = 2;
+  string body = 3;
+  string metadata_json = 4;
+  string encrypted_body = 5;
+}
+
+message AgentProtocolRequest {
+  string protocol_id = 1;
+  string initiator = 2;
+  repeated AgentMessage messages = 3;
+  string policy_scope = 4;
+}
+
+message AgentProtocolResponse {
+  bool accepted = 1;
+  string protocol_id = 2;
+  string transcript_json = 3;
+  repeated string findings = 4;
+}
+
+message QueueTaskRequest {
+  string task_id = 1;
+  string task_type = 2;
+  string target = 3;
+  string arguments_json = 4;
+  string priority = 5;
+}
+
+message QueueTaskResponse {
+  bool accepted = 1;
+  string task_id = 2;
+  string queue = 3;
+  string message = 4;
+}
+
+message PolicyReportRequest {
+  string subject = 1;
+  string capability = 2;
+}
+
+message PolicyReportResponse {
+  string subject = 1;
+  repeated string allowed_capabilities = 2;
+  repeated string denied_capabilities = 3;
+  string source = 4;
+}

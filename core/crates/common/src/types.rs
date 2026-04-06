@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeStatus {
@@ -13,6 +14,10 @@ pub struct RuntimeStatus {
     pub started_at: DateTime<Utc>,
     pub data_dir: String,
     pub log_file: String,
+    pub vector_memory_backend: String,
+    pub encryption_state: String,
+    pub audit_mode: String,
+    pub attestation_state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +25,8 @@ pub struct ToolCall {
     pub target: String,
     pub arguments_json: String,
     pub allow_network: bool,
+    #[serde(default)]
+    pub priority: QueuePriority,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,4 +53,167 @@ pub struct ScheduleRequest {
     pub cron: String,
     pub tool: String,
     pub arguments_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum QueuePriority {
+    #[default]
+    Interactive,
+    Connector,
+    Autonomy,
+    Background,
+}
+
+impl QueuePriority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::Connector => "connector",
+            Self::Autonomy => "autonomy",
+            Self::Background => "background",
+        }
+    }
+
+    pub fn weight(&self) -> u32 {
+        match self {
+            Self::Interactive => 100,
+            Self::Connector => 80,
+            Self::Autonomy => 40,
+            Self::Background => 20,
+        }
+    }
+}
+
+impl std::str::FromStr for QueuePriority {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "interactive" => Ok(Self::Interactive),
+            "connector" => Ok(Self::Connector),
+            "autonomy" => Ok(Self::Autonomy),
+            "background" => Ok(Self::Background),
+            other => Err(anyhow::anyhow!("unsupported queue priority {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorDescriptor {
+    pub name: String,
+    pub enabled: bool,
+    pub implemented: bool,
+    pub mode: String,
+    pub health: String,
+    pub allowlist: Vec<String>,
+    pub details: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttestationReport {
+    pub subject: String,
+    pub status: String,
+    pub platform: String,
+    pub hardware_backed: bool,
+    pub nonce: String,
+    pub public_key: String,
+    pub measurements: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEvent {
+    pub id: String,
+    pub category: String,
+    pub severity: String,
+    pub summary: String,
+    pub anomaly_score: f64,
+    pub payload_json: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryRecord {
+    pub key: String,
+    pub namespace: String,
+    pub content: String,
+    pub metadata_json: String,
+    pub score: f64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryQuery {
+    pub namespace: String,
+    pub query: String,
+    pub limit: usize,
+    pub filter_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEnvelope {
+    pub sender: String,
+    pub recipient: String,
+    pub body: String,
+    pub metadata_json: String,
+    pub encrypted_body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolRunRequest {
+    pub protocol_id: String,
+    pub initiator: String,
+    pub messages: Vec<AgentEnvelope>,
+    pub policy_scope: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolRunResult {
+    pub accepted: bool,
+    pub protocol_id: String,
+    pub transcript_json: String,
+    pub findings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyReport {
+    pub subject: String,
+    pub allowed_capabilities: Vec<String>,
+    pub denied_capabilities: Vec<String>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueTask {
+    pub task_id: String,
+    pub task_type: String,
+    pub target: String,
+    pub arguments_json: String,
+    pub priority: QueuePriority,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueReceipt {
+    pub accepted: bool,
+    pub task_id: String,
+    pub queue: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleBinding {
+    pub subject: String,
+    pub roles: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QueuePriority;
+
+    #[test]
+    fn queue_priority_parses() {
+        let value: QueuePriority = "connector".parse().expect("parse connector priority");
+        assert_eq!(value, QueuePriority::Connector);
+        assert_eq!(value.weight(), 80);
+    }
 }

@@ -3,8 +3,9 @@ use base64ct::{Base64, Encoding};
 use chrono::Utc;
 use openpinch_common::openpinch::SkillInfo;
 use openpinch_common::{
-    AppConfig, OpenPinchPaths, RegistryIndex, SkillManifest, SkillsConfig, ToolCall, ToolOutcome,
-    bundle_manifest_path, install_verified_bundle, read_text_file, verify_registry,
+    AppConfig, CapabilityMatrix, OpenPinchPaths, PolicyDecision, PolicyReport, RegistryIndex,
+    SkillManifest, SkillsConfig, ToolCall, ToolOutcome, bundle_manifest_path,
+    install_verified_bundle, load_capability_matrix, read_text_file, verify_registry,
     verify_skill_bundle,
 };
 use openpinch_sandbox::{SandboxCommand, SandboxHealth, SandboxManager};
@@ -148,10 +149,11 @@ impl SkillManager {
 
 #[derive(Clone)]
 pub struct ToolExecutor {
-    _config: AppConfig,
+    config: AppConfig,
     _paths: OpenPinchPaths,
     sandbox: SandboxManager,
     skills: SkillManager,
+    policy: CapabilityMatrix,
 }
 
 impl ToolExecutor {
@@ -160,13 +162,22 @@ impl ToolExecutor {
         paths: OpenPinchPaths,
         sandbox: SandboxManager,
         skills: SkillManager,
-    ) -> Self {
-        Self {
-            _config: config,
+    ) -> Result<Self> {
+        let policy_path = resolve_path(&config.sandbox.capabilities.matrix_path);
+        let policy = load_capability_matrix(&policy_path).with_context(|| {
+            format!(
+                "failed to load capability matrix from {}",
+                policy_path.display()
+            )
+        })?;
+
+        Ok(Self {
+            config,
             _paths: paths,
             sandbox,
             skills,
-        }
+            policy,
+        })
     }
 
     pub async fn execute(&self, request: ToolCall) -> ToolOutcome {
@@ -199,10 +210,48 @@ impl ToolExecutor {
         self.sandbox.health()
     }
 
+    pub fn policy_report(&self, subject: &str) -> PolicyReport {
+        let requested = vec![
+            "shell.execute".to_owned(),
+            "tool.local".to_owned(),
+            "network.egress".to_owned(),
+            "skill.execute".to_owned(),
+            "agent.message".to_owned(),
+        ];
+        let decision = self.policy.evaluate(
+            subject,
+            &requested,
+            self.config.sandbox.capabilities.default_deny,
+        );
+        PolicyReport {
+            subject: decision.subject,
+            allowed_capabilities: decision.allowed_capabilities,
+            denied_capabilities: decision.denied_capabilities,
+            source: decision.source,
+        }
+    }
+
+    fn authorize(&self, subject: &str, requested: Vec<String>) -> Result<PolicyDecision> {
+        let decision = self.policy.evaluate(
+            subject,
+            &requested,
+            self.config.sandbox.capabilities.default_deny,
+        );
+        if !decision.denied_capabilities.is_empty() {
+            bail!(
+                "policy denied {} for {}",
+                decision.denied_capabilities.join(", "),
+                subject
+            );
+        }
+        Ok(decision)
+    }
+
     async fn execute_inner(&self, request: ToolCall) -> Result<ToolOutcome> {
         let arguments = parse_json_object(&request.arguments_json)?;
         match request.target.as_str() {
             "builtin.echo" => {
+                self.authorize("builtin.echo", vec!["tool.local".to_owned()])?;
                 let message = arguments
                     .get("message")
                     .and_then(Value::as_str)
@@ -213,21 +262,33 @@ impl ToolExecutor {
                     vec!["echo handled locally".to_owned()],
                 ))
             }
-            "builtin.time" => Ok(success_outcome(
-                "current time resolved",
-                serde_json::json!({ "utc": Utc::now().to_rfc3339() }).to_string(),
-                vec!["timestamp generated locally".to_owned()],
-            )),
-            "builtin.system-info" => Ok(success_outcome(
-                "system info collected",
-                serde_json::json!({
-                    "os": std::env::consts::OS,
-                    "arch": std::env::consts::ARCH,
-                })
-                .to_string(),
-                vec!["system information collected".to_owned()],
-            )),
+            "builtin.time" => {
+                self.authorize("builtin.time", vec!["tool.local".to_owned()])?;
+                Ok(success_outcome(
+                    "current time resolved",
+                    serde_json::json!({ "utc": Utc::now().to_rfc3339() }).to_string(),
+                    vec!["timestamp generated locally".to_owned()],
+                ))
+            }
+            "builtin.system-info" => {
+                self.authorize("builtin.system-info", vec!["tool.inspect".to_owned()])?;
+                Ok(success_outcome(
+                    "system info collected",
+                    serde_json::json!({
+                        "os": std::env::consts::OS,
+                        "arch": std::env::consts::ARCH,
+                    })
+                    .to_string(),
+                    vec!["system information collected".to_owned()],
+                ))
+            }
             "builtin.command" => {
+                let mut requested = vec!["shell.execute".to_owned()];
+                if request.allow_network {
+                    requested.push("network.egress".to_owned());
+                }
+                let decision = self.authorize("builtin.command", requested.clone())?;
+
                 let program = arguments
                     .get("program")
                     .and_then(Value::as_str)
@@ -246,6 +307,8 @@ impl ToolExecutor {
                 let sandbox_output = self
                     .sandbox
                     .execute(SandboxCommand {
+                        subject: "builtin.command".to_owned(),
+                        capabilities: decision.allowed_capabilities,
                         program: program.to_owned(),
                         args,
                         env: vec![],
@@ -281,9 +344,16 @@ impl ToolExecutor {
         skill_id: &str,
         arguments_json: &str,
     ) -> Result<ToolOutcome> {
+        let subject = format!("skill.{skill_id}");
+        let decision = self.authorize(
+            &subject,
+            vec!["skill.execute".to_owned(), "sandbox.execute".to_owned()],
+        )?;
         let (manifest, workspace_archive_b64) = self.skills.packaged_workspace(skill_id)?;
         let command = match manifest.language.as_str() {
             "shell" => SandboxCommand {
+                subject: subject.clone(),
+                capabilities: decision.allowed_capabilities.clone(),
                 program: "/bin/sh".to_owned(),
                 args: vec![format!("/workspace/{}", manifest.entrypoint)],
                 env: vec![(
@@ -294,6 +364,8 @@ impl ToolExecutor {
                 workspace_archive_b64: Some(workspace_archive_b64),
             },
             _ => SandboxCommand {
+                subject: subject.clone(),
+                capabilities: decision.allowed_capabilities.clone(),
                 program: format!("/workspace/{}", manifest.entrypoint),
                 args: vec![],
                 env: vec![(
@@ -322,6 +394,17 @@ impl ToolExecutor {
             error: String::new(),
             logs: output.logs,
         })
+    }
+}
+
+fn resolve_path(configured: &str) -> PathBuf {
+    let path = PathBuf::from(configured);
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
     }
 }
 

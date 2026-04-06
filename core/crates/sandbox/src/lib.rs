@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxCommand {
+    pub subject: String,
+    pub capabilities: Vec<String>,
     pub program: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
@@ -74,6 +76,10 @@ impl SandboxManager {
 
     pub fn health(&self) -> SandboxHealth {
         self.backend.health()
+    }
+
+    pub fn doctor(&self) -> SandboxHealth {
+        self.health()
     }
 
     pub async fn execute(&self, command: SandboxCommand) -> Result<SandboxOutput> {

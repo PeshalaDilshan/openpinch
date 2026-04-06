@@ -8,13 +8,19 @@ The stack is split deliberately:
 - Go powers the public gateway, scheduler, and high-concurrency messaging connectors.
 - gRPC provides the contract between the Rust runtime and the Go gateway.
 - The sandbox layer defaults to strong local isolation, with a native Firecracker backend on Linux and hypervisor-oriented backends on macOS and Windows.
+- Security is deny-by-default: capability matrices, encrypted memory, attestation hooks, audit events, and optional mTLS are all built into the runtime surface.
 
 ## Highlights
 
 - Single monorepo with Rust workspace + Go gateway
 - Local-only model backends: Ollama, `llama.cpp` server, and OpenAI-compatible local endpoints
+- Orchestration layer with exact, prefix, and semantic caches plus speculative draft routing
+- Async task queue with interactive, connector, autonomy, and background priorities
+- Encrypted vector-memory fallback backed by SQLite with a LanceDB-oriented config surface
 - Signed skills registry with Ed25519 verification
-- Gateway-first messaging architecture with Telegram implemented end to end
+- Gateway-first messaging architecture with a 20+ connector catalog and Telegram implemented end to end
+- Zero-trust gateway options: mTLS, per-channel allowlists, attestation reporting, audit export
+- Formal protocol spec support for multi-agent handoff flows
 - Structured logging, local SQLite state, graceful shutdown, and deterministic setup scripts
 
 ## Repository Layout
@@ -28,6 +34,7 @@ The stack is split deliberately:
 │   ├── sandbox/          # sandbox backends and capability checks
 │   └── tools/            # built-ins, skill execution, install/verify flows
 ├── gateway/              # Go public gRPC API, Telegram connector, scheduler
+├── deploy/operator/      # Kubernetes operator scaffold and CRD manifests
 ├── proto/                # versioned protobuf definitions
 ├── skills/               # trust roots, registry, example skills
 ├── docs/                 # architecture, setup, sandbox, skills
@@ -46,23 +53,34 @@ make cli
 ./target/release/openpinch start --foreground
 ```
 
+The generated CLI also exposes:
+
+```bash
+openpinch connector list
+openpinch memory query "recent failures"
+openpinch policy show builtin.command
+openpinch audit export --sink json
+openpinch attest --include-hardware
+openpinch agent protocol handoff.v1 --initiator planner --message planner:executor:run-task
+```
+
 ## Local Runtime Model Support
 
 OpenPinch never assumes a hosted model. The default provider order is:
 
-1. Ollama
-2. `llama.cpp` server
+1. `llama.cpp` draft/fast local endpoint when enabled
+2. Ollama target model
 3. OpenAI-compatible local endpoints such as LM Studio or LocalAI
 
 Configure providers in the generated `config.toml`. No remote endpoint is enabled by default.
 
 ## Sandbox Model
 
-- Linux: Firecracker + `jailer` + seccomp + ephemeral workspace
-- macOS: virtualization backend contract for local hypervisor execution
-- Windows: Hyper-V backend contract for local hypervisor execution
+- Linux: Firecracker + `jailer` + seccomp + containerd-in-guest expectation + ephemeral workspace
+- macOS: virtualization backend contract plus Seatbelt-oriented policy path
+- Windows: Hyper-V backend contract plus Job Object restriction path
 
-The Linux Firecracker path is fully wired in code and validated through the sandbox doctor. Provisioning guest assets is described in [docs/sandbox.md](docs/sandbox.md).
+Capability enforcement is loaded from `skills/policies/default.yaml`. The Linux Firecracker path is fully wired in code and validated through the sandbox doctor. Provisioning guest assets is described in [docs/sandbox.md](docs/sandbox.md).
 
 ## Developer Workflow
 
@@ -79,6 +97,8 @@ openpinch status
 openpinch execute builtin.echo --args '{"message":"hello"}'
 openpinch skill list
 openpinch skill verify skills/examples/echo.skill
+openpinch connector list --json
+openpinch memory put incident-1 "sandbox degraded" --metadata '{"source":"cli"}'
 openpinch logs --tail 100
 ```
 
@@ -88,9 +108,9 @@ openpinch logs --tail 100
 - [Architecture](docs/architecture.md)
 - [Sandbox](docs/sandbox.md)
 - [Skills](docs/skills.md)
+- [Formal Protocols](docs/formal/handoff_v1.tla)
 - [Migration From OpenClaw](docs/migration-from-openclaw.md)
 
 ## Project Status
 
-This repository is intentionally production-shaped, but still early in product maturity. The architecture, contracts, and local developer workflow are in place; connector depth, model behavior, and platform-specific sandbox polish will continue to evolve.
-
+This repository is intentionally production-shaped, but still early in product maturity. The orchestration, connector catalog, policy surface, encryption hooks, and audit/attestation APIs are in place; the deepest platform-specific pieces such as real guest images, eBPF collectors, and operator reconciliation are the areas that will continue to evolve.

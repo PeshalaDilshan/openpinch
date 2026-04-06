@@ -1,0 +1,10 @@
+{
+  "protocol_id": "handoff.v1",
+  "generated_from": "docs/formal/handoff_v1.tla",
+  "rules": [
+    "first sender must equal initiator",
+    "no sender may equal recipient",
+    "handoff.v1 requires at least two messages",
+    "encrypted_body is required when agent channel encryption is enabled"
+  ]
+}

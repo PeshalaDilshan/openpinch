@@ -8,10 +8,21 @@ import (
 	"github.com/PeshalaDilshan/openpinch/gateway/internal/enginebridge"
 )
 
+type Descriptor struct {
+	Name        string
+	Enabled     bool
+	Implemented bool
+	Mode        string
+	Health      string
+	Allowlist   []string
+	Details     map[string]string
+}
+
 type Connector interface {
 	Name() string
 	Enabled() bool
 	Start(context.Context) error
+	Descriptor() Descriptor
 }
 
 type Registry struct {
@@ -23,10 +34,27 @@ func NewRegistry(cfg *config.Config, bridge *enginebridge.Client) *Registry {
 	return &Registry{
 		connectors: []Connector{
 			NewTelegram(cfg, bridge),
-			newStub("discord"),
-			newStub("slack"),
-			newStub("signal"),
-			newStub("whatsapp"),
+			newStub(cfg, "discord", "bot"),
+			newStub(cfg, "slack", "socket-mode"),
+			newStub(cfg, "whatsapp", "cloud-api"),
+			newStub(cfg, "signal", "signal-cli"),
+			newStub(cfg, "matrix", "appservice"),
+			newStub(cfg, "xmpp", "client"),
+			newStub(cfg, "irc", "client"),
+			newStub(cfg, "mattermost", "websocket"),
+			newStub(cfg, "microsoft-teams", "graph"),
+			newStub(cfg, "rocketchat", "rest"),
+			newStub(cfg, "zulip", "rest"),
+			newStub(cfg, "google-chat", "rest"),
+			newStub(cfg, "webex", "rest"),
+			newStub(cfg, "line", "messaging-api"),
+			newStub(cfg, "viber", "bot"),
+			newStub(cfg, "smtp", "outbound"),
+			newStub(cfg, "imap", "inbound"),
+			newStub(cfg, "twilio-sms", "sms"),
+			newStub(cfg, "twilio-mms", "mms"),
+			newStub(cfg, "webhook-inbound", "http"),
+			newStub(cfg, "webhook-outbound", "http"),
 		},
 	}
 }
@@ -65,12 +93,31 @@ func (r *Registry) EnabledNames() []string {
 	return names
 }
 
-type stub struct {
-	name string
+func (r *Registry) DescribeAll() []Descriptor {
+	descriptors := make([]Descriptor, 0, len(r.connectors))
+	for _, connector := range r.connectors {
+		descriptors = append(descriptors, connector.Descriptor())
+	}
+	return descriptors
 }
 
-func newStub(name string) Connector {
-	return &stub{name: name}
+func (r *Registry) Status(name string) (Descriptor, bool) {
+	for _, connector := range r.connectors {
+		if connector.Name() == name {
+			return connector.Descriptor(), true
+		}
+	}
+	return Descriptor{}, false
+}
+
+type stub struct {
+	cfg  *config.Config
+	name string
+	mode string
+}
+
+func newStub(cfg *config.Config, name string, mode string) Connector {
+	return &stub{cfg: cfg, name: name, mode: mode}
 }
 
 func (s *stub) Name() string {
@@ -78,9 +125,45 @@ func (s *stub) Name() string {
 }
 
 func (s *stub) Enabled() bool {
-	return false
+	connector, ok := s.cfg.Connectors[s.name]
+	return ok && connector.Enabled
+}
+
+func (s *stub) Descriptor() Descriptor {
+	connector := s.cfg.Connectors[s.name]
+	return Descriptor{
+		Name:        s.name,
+		Enabled:     connector.Enabled,
+		Implemented: false,
+		Mode:        firstNonEmpty(connector.Mode, s.mode, "disabled"),
+		Health:      healthFor(connector.Enabled, false),
+		Allowlist:   connector.Allowlist,
+		Details: map[string]string{
+			"transport": "api-first",
+			"status":    "scaffolded",
+		},
+	}
 }
 
 func (s *stub) Start(context.Context) error {
 	return nil
+}
+
+func healthFor(enabled bool, implemented bool) string {
+	if !enabled {
+		return "disabled"
+	}
+	if implemented {
+		return "ready"
+	}
+	return "scaffolded"
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

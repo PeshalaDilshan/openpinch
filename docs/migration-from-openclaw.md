@@ -12,4 +12,5 @@ OpenPinch keeps the same broad monorepo shape as OpenClaw, but the internals dif
 - Existing skill ideas can be ported, but package manifests must be signed with the OpenPinch trust model.
 - Messaging connectors should target the gateway connector interface, not the Rust engine directly.
 - Local model configuration is explicit and never defaults to a hosted provider.
-
+- Capability matrices must be reviewed because OpenPinch v2 is deny-by-default for shell, skill, and connector actions.
+- The migration helper script `scripts/migrate-openclaw.sh` produces a dry-run inventory report for existing configs and connector files.

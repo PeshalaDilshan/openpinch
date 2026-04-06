@@ -1,0 +1,38 @@
+version: openpinch.v2.default
+default_capabilities:
+  - tool.local
+subjects:
+  builtin.echo:
+    description: Safe local echo helper.
+    allow:
+      - tool.local
+  builtin.time:
+    description: Safe local time helper.
+    allow:
+      - tool.local
+  builtin.system-info:
+    description: Local inspection only.
+    allow:
+      - tool.inspect
+  builtin.command:
+    description: Local shell execution inside a sandbox with deny-by-default networking.
+    allow:
+      - shell.execute
+      - sandbox.execute
+    deny:
+      - network.egress
+  skill.*:
+    description: Verified skills execute inside the sandbox without outbound network.
+    allow:
+      - skill.execute
+      - sandbox.execute
+    deny:
+      - network.egress
+  agent.*:
+    description: Inter-agent envelopes are allowed only through the protocol validator.
+    allow:
+      - agent.message
+  connector.*:
+    description: Connector operations remain API-first and zero-trust.
+    allow:
+      - connector.message

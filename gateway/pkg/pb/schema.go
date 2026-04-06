@@ -2,6 +2,8 @@ package pb
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/jhump/protoreflect/desc/protoparse"
@@ -10,124 +12,6 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 )
-
-const source = `syntax = "proto3";
-
-package openpinch.v1;
-
-service GatewayService {
-  rpc GetStatus(Empty) returns (StatusResponse);
-  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
-  rpc ListSkills(Empty) returns (SkillListResponse);
-  rpc InstallSkill(InstallSkillRequest) returns (InstallSkillResponse);
-  rpc TailLogs(LogRequest) returns (stream LogChunk);
-  rpc SubmitMessage(SubmitMessageRequest) returns (SubmitMessageResponse);
-  rpc ScheduleJob(ScheduleJobRequest) returns (ScheduleJobResponse);
-}
-
-service EngineRuntimeService {
-  rpc DeliverMessage(EngineMessageRequest) returns (SubmitMessageResponse);
-  rpc RunTool(EngineToolRequest) returns (ExecuteResponse);
-  rpc RunSkill(EngineSkillRequest) returns (ExecuteResponse);
-  rpc Health(Empty) returns (HealthResponse);
-}
-
-message Empty {}
-message StatusResponse {
-  string status = 1;
-  string version = 2;
-  string runtime_endpoint = 3;
-  string gateway_endpoint = 4;
-  repeated string enabled_connectors = 5;
-  repeated string available_model_backends = 6;
-  int64 uptime_seconds = 7;
-  string started_at = 8;
-  string data_dir = 9;
-  string log_file = 10;
-}
-message ExecuteRequest {
-  string target = 1;
-  string arguments_json = 2;
-  bool allow_network = 3;
-}
-message ExecuteResponse {
-  bool success = 1;
-  string summary = 2;
-  string data_json = 3;
-  string error = 4;
-  repeated string logs = 5;
-}
-message SkillInfo {
-  string id = 1;
-  string version = 2;
-  string name = 3;
-  string description = 4;
-  bool installed = 5;
-  bool verified = 6;
-  string entrypoint = 7;
-  string language = 8;
-}
-message SkillListResponse {
-  repeated SkillInfo skills = 1;
-  string registry_version = 2;
-}
-message InstallSkillRequest {
-  string source = 1;
-  bool force = 2;
-}
-message InstallSkillResponse {
-  bool installed = 1;
-  SkillInfo skill = 2;
-  string message = 3;
-}
-message LogRequest {
-  uint32 tail = 1;
-  bool follow = 2;
-}
-message LogChunk {
-  string line = 1;
-  string timestamp = 2;
-}
-message SubmitMessageRequest {
-  string connector = 1;
-  string channel_id = 2;
-  string sender = 3;
-  string body = 4;
-  string metadata_json = 5;
-}
-message SubmitMessageResponse {
-  bool accepted = 1;
-  string message_id = 2;
-  string reply = 3;
-}
-message ScheduleJobRequest {
-  string job_id = 1;
-  string cron = 2;
-  string tool = 3;
-  string arguments_json = 4;
-}
-message ScheduleJobResponse {
-  bool accepted = 1;
-  string message = 2;
-}
-message EngineMessageRequest {
-  SubmitMessageRequest message = 1;
-}
-message EngineToolRequest {
-  string tool = 1;
-  string arguments_json = 2;
-  bool allow_network = 3;
-}
-message EngineSkillRequest {
-  string skill_id = 1;
-  string arguments_json = 2;
-}
-message HealthResponse {
-  string status = 1;
-  repeated string missing_prerequisites = 2;
-  string sandbox_backend = 3;
-}
-`
 
 type Schema struct {
 	file     protoreflect.FileDescriptor
@@ -143,12 +27,16 @@ var (
 
 func Load() (*Schema, error) {
 	once.Do(func() {
-		parser := protoparse.Parser{
-			Accessor: protoparse.FileContentsFromMap(map[string]string{
-				"openpinch.proto": source,
-			}),
+		protoPath, findErr := discoverProtoPath()
+		if findErr != nil {
+			err = findErr
+			return
 		}
-		files, parseErr := parser.ParseFiles("openpinch.proto")
+
+		parser := protoparse.Parser{
+			ImportPaths: []string{filepath.Dir(protoPath)},
+		}
+		files, parseErr := parser.ParseFiles(filepath.Base(protoPath))
 		if parseErr != nil {
 			err = fmt.Errorf("parse proto: %w", parseErr)
 			return
@@ -233,6 +121,17 @@ func SetMessage(message protoreflect.Message, name string, child proto.Message) 
 	message.Set(field, protoreflect.ValueOfMessage(child.ProtoReflect()))
 }
 
+func SetStringMap(message protoreflect.Message, name string, values map[string]string) {
+	field := FieldByName(message, name)
+	target := message.Mutable(field).Map()
+	for key, value := range values {
+		target.Set(
+			protoreflect.ValueOfString(key).MapKey(),
+			protoreflect.ValueOfString(value),
+		)
+	}
+}
+
 func GetString(message protoreflect.Message, name string) string {
 	field := FieldByName(message, name)
 	return message.Get(field).String()
@@ -256,4 +155,20 @@ func GetUint32(message protoreflect.Message, name string) uint32 {
 func GetMessage(message protoreflect.Message, name string) protoreflect.Message {
 	field := FieldByName(message, name)
 	return message.Get(field).Message()
+}
+
+func discoverProtoPath() (string, error) {
+	candidates := []string{
+		filepath.Join("..", "proto", "openpinch.proto"),
+		filepath.Join("proto", "openpinch.proto"),
+		filepath.Join("..", "..", "proto", "openpinch.proto"),
+	}
+
+	for _, candidate := range candidates {
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			return candidate, nil
+		}
+	}
+
+	return "", fmt.Errorf("unable to locate proto/openpinch.proto from current working directory")
 }
