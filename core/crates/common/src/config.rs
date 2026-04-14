@@ -23,6 +23,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub agents: AgentsConfig,
     #[serde(default)]
+    pub brain: BrainConfig,
+    #[serde(default)]
     pub vector_memory: VectorMemoryConfig,
     #[serde(default)]
     pub rbac: RbacConfig,
@@ -104,6 +106,49 @@ impl AppConfig {
                     .parse()
                     .context("expected bool for security.encryption.enabled")?
             }
+            "brain.enabled" => {
+                self.brain.enabled = value.parse().context("expected bool for brain.enabled")?
+            }
+            "brain.auto_ingest_messages" => {
+                self.brain.auto_ingest_messages = value
+                    .parse()
+                    .context("expected bool for brain.auto_ingest_messages")?
+            }
+            "brain.auto_ingest_tool_results" => {
+                self.brain.auto_ingest_tool_results = value
+                    .parse()
+                    .context("expected bool for brain.auto_ingest_tool_results")?
+            }
+            "brain.auto_ingest_assistant_commitments" => {
+                self.brain.auto_ingest_assistant_commitments = value
+                    .parse()
+                    .context("expected bool for brain.auto_ingest_assistant_commitments")?
+            }
+            "brain.inline_suggestions_in_replies" => {
+                self.brain.inline_suggestions_in_replies = value
+                    .parse()
+                    .context("expected bool for brain.inline_suggestions_in_replies")?
+            }
+            "brain.max_inline_suggestions" => {
+                self.brain.max_inline_suggestions = value
+                    .parse()
+                    .context("expected integer for brain.max_inline_suggestions")?
+            }
+            "brain.context_budget_chars" => {
+                self.brain.context_budget_chars = value
+                    .parse()
+                    .context("expected integer for brain.context_budget_chars")?
+            }
+            "brain.archive_decay_days" => {
+                self.brain.archive_decay_days = value
+                    .parse()
+                    .context("expected integer for brain.archive_decay_days")?
+            }
+            "brain.stale_task_hours" => {
+                self.brain.stale_task_hours = value
+                    .parse()
+                    .context("expected integer for brain.stale_task_hours")?
+            }
             "vector_memory.default_namespace" => {
                 self.vector_memory.default_namespace = value.to_owned()
             }
@@ -169,6 +214,7 @@ impl Default for AppConfig {
             runtime: RuntimeConfig::default(),
             security: SecurityConfig::default(),
             agents: AgentsConfig::default(),
+            brain: BrainConfig::default(),
             vector_memory: VectorMemoryConfig::default(),
             rbac: RbacConfig::default(),
             siem: SiemConfig::default(),
@@ -776,6 +822,60 @@ fn default_protocol_dir() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub auto_ingest_messages: bool,
+    #[serde(default = "default_true")]
+    pub auto_ingest_tool_results: bool,
+    #[serde(default = "default_true")]
+    pub auto_ingest_assistant_commitments: bool,
+    #[serde(default = "default_true")]
+    pub inline_suggestions_in_replies: bool,
+    #[serde(default = "default_brain_inline_suggestions")]
+    pub max_inline_suggestions: usize,
+    #[serde(default = "default_brain_context_budget")]
+    pub context_budget_chars: usize,
+    #[serde(default = "default_brain_archive_decay_days")]
+    pub archive_decay_days: i64,
+    #[serde(default = "default_brain_stale_task_hours")]
+    pub stale_task_hours: i64,
+}
+
+impl Default for BrainConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_ingest_messages: true,
+            auto_ingest_tool_results: true,
+            auto_ingest_assistant_commitments: true,
+            inline_suggestions_in_replies: true,
+            max_inline_suggestions: default_brain_inline_suggestions(),
+            context_budget_chars: default_brain_context_budget(),
+            archive_decay_days: default_brain_archive_decay_days(),
+            stale_task_hours: default_brain_stale_task_hours(),
+        }
+    }
+}
+
+fn default_brain_inline_suggestions() -> usize {
+    2
+}
+
+fn default_brain_context_budget() -> usize {
+    2_000
+}
+
+fn default_brain_archive_decay_days() -> i64 {
+    30
+}
+
+fn default_brain_stale_task_hours() -> i64 {
+    24
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorMemoryConfig {
     #[serde(default = "default_vector_backend")]
     pub requested_backend: String,
@@ -923,6 +1023,8 @@ mod tests {
         let config = AppConfig::default();
         assert!(config.orchestration.speculative_enabled);
         assert!(config.security.encryption.enabled);
+        assert!(config.brain.enabled);
+        assert_eq!(config.brain.max_inline_suggestions, 2);
         assert_eq!(config.vector_memory.requested_backend, "lancedb");
         assert!(config.connectors.contains_key("telegram"));
         assert!(config.connectors.contains_key("twilio-mms"));
@@ -940,9 +1042,13 @@ mod tests {
         config
             .set("connectors.matrix.mode", "bridge")
             .expect("set connector field");
+        config
+            .set("brain.context_budget_chars", "4096")
+            .expect("set brain field");
 
         assert_eq!(config.models["ollama"].quantization, "Q8_0");
         assert!(!config.security.audit.enabled);
+        assert_eq!(config.brain.context_budget_chars, 4096);
         assert_eq!(config.connectors["matrix"].mode, "bridge");
     }
 }

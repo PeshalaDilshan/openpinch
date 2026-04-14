@@ -2,7 +2,9 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use openpinch_common::openpinch::gateway_service_client::GatewayServiceClient;
 use openpinch_common::openpinch::{
-    AgentMessage, AgentProtocolRequest, AttestationRequest, AuditExportRequest,
+    AgentMessage, AgentProtocolRequest, AttestationRequest, AuditExportRequest, BrainEntity,
+    BrainFact, BrainForgetRequest, BrainRecallRequest, BrainRelation, BrainRememberRequest,
+    BrainSuggestRequest, BrainSuggestion, BrainTask, BrainTaskListRequest, BrainTaskUpdateRequest,
     ConnectorStatusRequest, Empty, ExecuteRequest, MemoryQueryRequest, MemoryUpsertRequest,
     PolicyReportRequest,
 };
@@ -49,6 +51,10 @@ enum Commands {
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
+    },
+    Brain {
+        #[command(subcommand)]
+        command: BrainCommand,
     },
     Policy {
         #[command(subcommand)]
@@ -146,6 +152,83 @@ enum MemoryCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum BrainCommand {
+    Remember {
+        kind: String,
+        title: String,
+        content: String,
+        #[arg(long, default_value = "")]
+        subtype: String,
+        #[arg(long, default_value_t = 0.75)]
+        importance: f64,
+        #[arg(long, default_value = "{}")]
+        scope: String,
+        #[arg(long, default_value = "[]")]
+        links: String,
+        #[arg(long, default_value = "")]
+        source_ref: String,
+    },
+    Recall {
+        query: String,
+        #[arg(long, default_value = "{}")]
+        scope: String,
+        #[arg(long, default_value_t = 5)]
+        limit: u32,
+        #[arg(long, default_value_t = false)]
+        include_archived: bool,
+    },
+    Suggest {
+        #[arg(long, default_value = "{}")]
+        scope: String,
+        #[arg(long, default_value_t = 5)]
+        limit: u32,
+    },
+    Task {
+        #[command(subcommand)]
+        command: BrainTaskCommand,
+    },
+    Forget {
+        target_kind: String,
+        target_id: String,
+        #[arg(long, default_value = "archive")]
+        mode: String,
+        #[arg(long, default_value = "")]
+        reason: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BrainTaskCommand {
+    List {
+        #[arg(long, default_value = "{}")]
+        scope: String,
+        #[arg(long = "status")]
+        statuses: Vec<String>,
+        #[arg(long = "priority")]
+        priorities: Vec<String>,
+        #[arg(long, default_value = "")]
+        due_before: String,
+        #[arg(long, default_value_t = 10)]
+        limit: u32,
+    },
+    Update {
+        task_id: String,
+        #[arg(long, default_value = "open")]
+        status: String,
+        #[arg(long, default_value = "normal")]
+        priority: String,
+        #[arg(long, default_value = "")]
+        due_at: String,
+        #[arg(long, default_value = "")]
+        summary: String,
+        #[arg(long, default_value = "[]")]
+        links: String,
+        #[arg(long, default_value = "")]
+        source_ref: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum PolicyCommand {
     Show {
         subject: String,
@@ -218,6 +301,7 @@ async fn main() -> Result<()> {
             handle_connector_command(&config, command, cli.json).await?
         }
         Commands::Memory { command } => handle_memory_command(&config, command, cli.json).await?,
+        Commands::Brain { command } => handle_brain_command(&config, command, cli.json).await?,
         Commands::Policy { command } => handle_policy_command(&config, command, cli.json).await?,
         Commands::Audit { command } => handle_audit_command(&config, command, cli.json).await?,
         Commands::Attest(command) => handle_attest_command(&config, command, cli.json).await?,
@@ -706,6 +790,207 @@ async fn handle_memory_command(
     Ok(())
 }
 
+async fn handle_brain_command(
+    config: &AppConfig,
+    command: BrainCommand,
+    json_output: bool,
+) -> Result<()> {
+    let mut client = connect_gateway(config).await?;
+    match command {
+        BrainCommand::Remember {
+            kind,
+            subtype,
+            title,
+            content,
+            importance,
+            scope,
+            links,
+            source_ref,
+        } => {
+            let response = client
+                .remember_brain(BrainRememberRequest {
+                    kind,
+                    subtype,
+                    title,
+                    content,
+                    importance,
+                    scope_json: scope,
+                    links_json: links,
+                    source_ref,
+                })
+                .await?
+                .into_inner();
+            let value = json!({
+                "stored": response.stored,
+                "digest": response.digest,
+                "entity": response.entity.as_ref().map(brain_entity_json),
+                "task": response.task.as_ref().map(brain_task_json),
+            });
+            let text = if let Some(task) = response.task {
+                format!("stored task {} [{}]", task.summary, task.status)
+            } else if let Some(entity) = response.entity {
+                format!("stored {} {}", entity.kind, entity.title)
+            } else {
+                format!("stored brain record {}", response.digest)
+            };
+            emit(json_output, value, text);
+        }
+        BrainCommand::Recall {
+            query,
+            scope,
+            limit,
+            include_archived,
+        } => {
+            let response = client
+                .recall_brain(BrainRecallRequest {
+                    query,
+                    scope_json: scope,
+                    limit,
+                    include_archived,
+                })
+                .await?
+                .into_inner();
+            let value = json!({
+                "summary": response.summary,
+                "entities": response.entities.iter().map(brain_entity_json).collect::<Vec<_>>(),
+                "facts": response.facts.iter().map(brain_fact_json).collect::<Vec<_>>(),
+                "relations": response.relations.iter().map(brain_relation_json).collect::<Vec<_>>(),
+                "tasks": response.tasks.iter().map(brain_task_json).collect::<Vec<_>>(),
+            });
+            let text = format!(
+                "{}\nentities: {}\nfacts: {}\nrelations: {}\ntasks: {}",
+                response.summary,
+                response.entities.len(),
+                response.facts.len(),
+                response.relations.len(),
+                response.tasks.len(),
+            );
+            emit(json_output, value, text);
+        }
+        BrainCommand::Suggest { scope, limit } => {
+            let response = client
+                .suggest_brain(BrainSuggestRequest {
+                    scope_json: scope,
+                    limit,
+                })
+                .await?
+                .into_inner();
+            let value = json!({
+                "summary": response.summary,
+                "suggestions": response.suggestions.iter().map(brain_suggestion_json).collect::<Vec<_>>(),
+            });
+            let lines = response
+                .suggestions
+                .iter()
+                .map(|suggestion| format!("- {} ({})", suggestion.summary, suggestion.reason))
+                .collect::<Vec<_>>();
+            let text = if lines.is_empty() {
+                response.summary
+            } else {
+                format!("{}\n{}", response.summary, lines.join("\n"))
+            };
+            emit(json_output, value, text);
+        }
+        BrainCommand::Task { command } => match command {
+            BrainTaskCommand::List {
+                scope,
+                statuses,
+                priorities,
+                due_before,
+                limit,
+            } => {
+                let response = client
+                    .list_brain_tasks(BrainTaskListRequest {
+                        scope_json: scope,
+                        statuses,
+                        priorities,
+                        due_before,
+                        limit,
+                    })
+                    .await?
+                    .into_inner();
+                let value = json!({
+                    "summary": response.summary,
+                    "tasks": response.tasks.iter().map(brain_task_json).collect::<Vec<_>>(),
+                });
+                let lines = response
+                    .tasks
+                    .iter()
+                    .map(|task| format!("- {} [{} / {}]", task.summary, task.status, task.priority))
+                    .collect::<Vec<_>>();
+                let text = if lines.is_empty() {
+                    response.summary
+                } else {
+                    format!("{}\n{}", response.summary, lines.join("\n"))
+                };
+                emit(json_output, value, text);
+            }
+            BrainTaskCommand::Update {
+                task_id,
+                status,
+                priority,
+                due_at,
+                summary,
+                links,
+                source_ref,
+            } => {
+                let response = client
+                    .update_brain_task(BrainTaskUpdateRequest {
+                        task_id,
+                        status,
+                        priority,
+                        due_at,
+                        summary,
+                        links_json: links,
+                        source_ref,
+                    })
+                    .await?
+                    .into_inner();
+                let task = response
+                    .task
+                    .as_ref()
+                    .context("brain task update returned no task")?;
+                let value = json!({
+                    "updated": response.updated,
+                    "task": brain_task_json(task),
+                });
+                emit(
+                    json_output,
+                    value,
+                    format!("updated task {} [{}]", task.summary, task.status),
+                );
+            }
+        },
+        BrainCommand::Forget {
+            target_kind,
+            target_id,
+            mode,
+            reason,
+        } => {
+            let response = client
+                .forget_brain(BrainForgetRequest {
+                    target_kind,
+                    target_id,
+                    mode,
+                    reason,
+                })
+                .await?
+                .into_inner();
+            let value = json!({
+                "forgotten": response.forgotten,
+                "mode": response.mode,
+                "target_id": response.target_id,
+            });
+            emit(
+                json_output,
+                value,
+                format!("forgotten {} via {}", response.target_id, response.mode),
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn handle_policy_command(
     config: &AppConfig,
     command: PolicyCommand,
@@ -887,6 +1172,79 @@ fn handle_operator_command(
         ),
     }
     Ok(())
+}
+
+fn brain_entity_json(entity: &BrainEntity) -> serde_json::Value {
+    json!({
+        "id": entity.id,
+        "kind": entity.kind,
+        "subtype": entity.subtype,
+        "title": entity.title,
+        "content": entity.content,
+        "scope_json": entity.scope_json,
+        "links_json": entity.links_json,
+        "salience": entity.salience,
+        "confidence": entity.confidence,
+        "archived": entity.archived,
+        "created_at": entity.created_at,
+        "updated_at": entity.updated_at,
+    })
+}
+
+fn brain_fact_json(fact: &BrainFact) -> serde_json::Value {
+    json!({
+        "id": fact.id,
+        "entity_id": fact.entity_id,
+        "content": fact.content,
+        "scope_json": fact.scope_json,
+        "salience": fact.salience,
+        "confidence": fact.confidence,
+        "archived": fact.archived,
+        "created_at": fact.created_at,
+        "updated_at": fact.updated_at,
+    })
+}
+
+fn brain_relation_json(relation: &BrainRelation) -> serde_json::Value {
+    json!({
+        "id": relation.id,
+        "kind": relation.kind,
+        "from_id": relation.from_id,
+        "to_id": relation.to_id,
+        "metadata_json": relation.metadata_json,
+        "confidence": relation.confidence,
+        "created_at": relation.created_at,
+        "updated_at": relation.updated_at,
+    })
+}
+
+fn brain_task_json(task: &BrainTask) -> serde_json::Value {
+    json!({
+        "id": task.id,
+        "title": task.title,
+        "summary": task.summary,
+        "status": task.status,
+        "priority": task.priority,
+        "due_at": task.due_at,
+        "scope_json": task.scope_json,
+        "links_json": task.links_json,
+        "salience": task.salience,
+        "confidence": task.confidence,
+        "archived": task.archived,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    })
+}
+
+fn brain_suggestion_json(suggestion: &BrainSuggestion) -> serde_json::Value {
+    json!({
+        "id": suggestion.id,
+        "task_id": suggestion.task_id,
+        "summary": suggestion.summary,
+        "reason": suggestion.reason,
+        "score": suggestion.score,
+        "context_json": suggestion.context_json,
+    })
 }
 
 async fn connect_gateway(
