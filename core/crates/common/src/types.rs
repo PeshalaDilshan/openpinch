@@ -151,6 +151,164 @@ pub struct MemoryQuery {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainRemember {
+    pub kind: String,
+    pub subtype: String,
+    pub title: String,
+    pub content: String,
+    pub importance: f64,
+    pub scope_json: String,
+    pub links_json: String,
+    pub source_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainRecallQuery {
+    pub query: String,
+    pub scope_json: String,
+    pub limit: usize,
+    pub include_archived: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainSuggestQuery {
+    pub scope_json: String,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainTaskListQuery {
+    pub scope_json: String,
+    pub statuses: Vec<String>,
+    pub priorities: Vec<String>,
+    pub due_before: Option<DateTime<Utc>>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainTaskUpdate {
+    pub task_id: String,
+    pub status: String,
+    pub priority: String,
+    pub due_at: Option<DateTime<Utc>>,
+    pub summary: String,
+    pub links_json: String,
+    pub source_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainForget {
+    pub target_kind: String,
+    pub target_id: String,
+    pub mode: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainEntityRecord {
+    pub id: String,
+    pub kind: String,
+    pub subtype: String,
+    pub title: String,
+    pub content: String,
+    pub scope_json: String,
+    pub links_json: String,
+    pub salience: f64,
+    pub confidence: f64,
+    pub archived: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainFactRecord {
+    pub id: String,
+    pub entity_id: String,
+    pub content: String,
+    pub scope_json: String,
+    pub salience: f64,
+    pub confidence: f64,
+    pub archived: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainRelationRecord {
+    pub id: String,
+    pub kind: String,
+    pub from_id: String,
+    pub to_id: String,
+    pub metadata_json: String,
+    pub confidence: f64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainTaskRecord {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    pub status: String,
+    pub priority: String,
+    pub due_at: Option<DateTime<Utc>>,
+    pub scope_json: String,
+    pub links_json: String,
+    pub salience: f64,
+    pub confidence: f64,
+    pub archived: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainSuggestionRecord {
+    pub id: String,
+    pub task_id: String,
+    pub summary: String,
+    pub reason: String,
+    pub score: f64,
+    pub context_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainRecallResult {
+    pub summary: String,
+    pub entities: Vec<BrainEntityRecord>,
+    pub facts: Vec<BrainFactRecord>,
+    pub relations: Vec<BrainRelationRecord>,
+    pub tasks: Vec<BrainTaskRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainSuggestResult {
+    pub summary: String,
+    pub suggestions: Vec<BrainSuggestionRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainTaskListResult {
+    pub summary: String,
+    pub tasks: Vec<BrainTaskRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainRememberResult {
+    pub stored: bool,
+    pub entity: Option<BrainEntityRecord>,
+    pub task: Option<BrainTaskRecord>,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainForgetResult {
+    pub forgotten: bool,
+    pub mode: String,
+    pub target_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentEnvelope {
     pub sender: String,
     pub recipient: String,

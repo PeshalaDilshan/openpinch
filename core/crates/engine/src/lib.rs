@@ -2,33 +2,42 @@ mod providers;
 
 use anyhow::{Context, Result, bail};
 use base64ct::{Base64, Encoding};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use openpinch_common::openpinch::engine_runtime_service_server::{
     EngineRuntimeService, EngineRuntimeServiceServer,
 };
 use openpinch_common::openpinch::{
     AgentProtocolRequest, AgentProtocolResponse, AttestationRequest, AttestationResponse,
-    AuditEvent as ProtoAuditEvent, AuditExportRequest, AuditExportResponse, Empty,
-    EngineMessageRequest, EngineSkillRequest, EngineToolRequest, ExecuteResponse, HealthResponse,
-    MemoryQueryRequest, MemoryQueryResponse, MemoryRecord as ProtoMemoryRecord,
-    MemoryUpsertRequest, MemoryUpsertResponse, PolicyReportRequest, PolicyReportResponse,
-    QueueTaskRequest, QueueTaskResponse, StatusResponse, SubmitMessageResponse,
+    AuditEvent as ProtoAuditEvent, AuditExportRequest, AuditExportResponse, BrainEntity, BrainFact,
+    BrainForgetRequest, BrainForgetResponse, BrainRecallRequest, BrainRecallResponse,
+    BrainRelation, BrainRememberRequest, BrainRememberResponse, BrainSuggestRequest,
+    BrainSuggestResponse, BrainSuggestion, BrainTask, BrainTaskListRequest, BrainTaskListResponse,
+    BrainTaskUpdateRequest, BrainTaskUpdateResponse, Empty, EngineMessageRequest,
+    EngineSkillRequest, EngineToolRequest, ExecuteResponse, HealthResponse, MemoryQueryRequest,
+    MemoryQueryResponse, MemoryRecord as ProtoMemoryRecord, MemoryUpsertRequest,
+    MemoryUpsertResponse, PolicyReportRequest, PolicyReportResponse, QueueTaskRequest,
+    QueueTaskResponse, StatusResponse, SubmitMessageResponse,
 };
 use openpinch_common::{
-    AppConfig, AttestationReport, AuditEvent, EncryptedBlob, MemoryQuery, MemoryRecord,
-    MessageEnvelope, OpenPinchPaths, PolicyReport, ProtocolRunRequest, ProtocolRunResult,
-    QueuePriority, QueueReceipt, QueueTask, RoleBinding, RuntimeStatus, ScheduleRequest,
-    SessionIdentity, SessionKeypair, ToolCall, ToolOutcome, decrypt_bytes,
-    derive_key_from_material, encrypt_bytes,
+    AppConfig, AttestationReport, AuditEvent, BrainConfig, BrainEntityRecord, BrainFactRecord,
+    BrainForget, BrainForgetResult, BrainRecallQuery, BrainRecallResult, BrainRelationRecord,
+    BrainRemember, BrainRememberResult, BrainSuggestQuery, BrainSuggestResult,
+    BrainSuggestionRecord, BrainTaskListQuery, BrainTaskListResult, BrainTaskRecord,
+    BrainTaskUpdate, EncryptedBlob, MemoryQuery, MemoryRecord, MessageEnvelope, OpenPinchPaths,
+    PolicyReport, ProtocolRunRequest, ProtocolRunResult, QueuePriority, QueueReceipt, QueueTask,
+    RoleBinding, RuntimeStatus, ScheduleRequest, SessionIdentity, SessionKeypair, ToolCall,
+    ToolOutcome, decrypt_bytes, derive_key_from_material, encrypt_bytes,
 };
 use openpinch_sandbox::SandboxManager;
 use openpinch_tools::{SkillManager, ToolExecutor};
 use parking_lot::Mutex;
 use providers::ProviderRegistry;
 use rusqlite::{Connection, params};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -59,6 +68,7 @@ struct EngineInner {
     tools: ToolExecutor,
     _skills: SkillManager,
     orchestrator: Orchestrator,
+    brain: BrainManager,
     queue: QueueManager,
     encryption: EncryptionManager,
     started_at: DateTime<Utc>,
@@ -86,12 +96,8 @@ impl EngineRuntime {
         let providers = ProviderRegistry::from_config(&config.models);
         let orchestrator =
             Orchestrator::new(config.clone(), state.clone(), providers, encryption.clone());
-        let queue = QueueManager::new(
-            config.clone(),
-            state.clone(),
-            tools.clone(),
-            encryption.clone(),
-        );
+        let brain = BrainManager::new(&config, &paths, state.clone(), encryption.clone())?;
+        let queue = QueueManager::new(config.clone(), state.clone(), tools.clone(), brain.clone());
 
         Ok(Self {
             inner: Arc::new(EngineInner {
@@ -101,6 +107,7 @@ impl EngineRuntime {
                 tools,
                 _skills: skills,
                 orchestrator,
+                brain,
                 queue,
                 encryption,
                 started_at: Utc::now(),
@@ -174,7 +181,11 @@ impl EngineRuntime {
     }
 
     pub async fn execute_tool(&self, call: ToolCall) -> ToolOutcome {
-        self.inner.tools.execute(call).await
+        let outcome = self.inner.tools.execute(call.clone()).await;
+        if outcome.success {
+            let _ = self.inner.brain.ingest_tool_result(&call, &outcome);
+        }
+        outcome
     }
 
     pub async fn execute_skill(&self, skill_id: &str, arguments_json: &str) -> ToolOutcome {
@@ -186,11 +197,25 @@ impl EngineRuntime {
 
     pub async fn handle_message(&self, message: MessageEnvelope) -> Result<String> {
         self.inner.state.record_message(&message)?;
+        let _ = self.inner.brain.ingest_message(&message);
+        let scope_json = self.inner.brain.scope_for_message(&message);
+        let context_pack = self
+            .inner
+            .brain
+            .build_context_pack(&message.body, &scope_json)
+            .unwrap_or_default();
 
-        let prompt = format!(
-            "You are OpenPinch, a local autonomous agent. Connector: {}. Sender: {}. Message: {}",
-            message.connector, message.sender, message.body
-        );
+        let prompt = if context_pack.is_empty() {
+            format!(
+                "You are OpenPinch, a local autonomous agent. Connector: {}. Sender: {}. Message: {}",
+                message.connector, message.sender, message.body
+            )
+        } else {
+            format!(
+                "You are OpenPinch, a local autonomous agent.\nConnector: {}\nSender: {}\nRelevant brain context:\n{}\nUser message: {}",
+                message.connector, message.sender, context_pack, message.body
+            )
+        };
 
         match self
             .inner
@@ -199,6 +224,29 @@ impl EngineRuntime {
             .await
         {
             Ok(result) => {
+                let mut reply = result.response.clone();
+                let _ = self.inner.brain.ingest_assistant_reply(&message, &reply);
+                if self.inner.config.brain.inline_suggestions_in_replies {
+                    let suggestions = self
+                        .inner
+                        .brain
+                        .inline_suggestions(
+                            &scope_json,
+                            self.inner.config.brain.max_inline_suggestions,
+                        )
+                        .unwrap_or_default();
+                    if !suggestions.is_empty() {
+                        let suffix = suggestions
+                            .iter()
+                            .take(self.inner.config.brain.max_inline_suggestions)
+                            .map(|suggestion| {
+                                format!("- {} ({})", suggestion.summary, suggestion.reason)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        reply = format!("{reply}\n\nNext actions:\n{suffix}");
+                    }
+                }
                 self.record_audit(
                     "connector.message",
                     "info",
@@ -211,7 +259,7 @@ impl EngineRuntime {
                     })
                     .to_string(),
                 )?;
-                Ok(result.response)
+                Ok(reply)
             }
             Err(error) => {
                 self.record_audit(
@@ -355,6 +403,54 @@ impl EngineRuntime {
             .to_string(),
         )?;
         Ok(digest)
+    }
+
+    pub fn remember_brain(&self, request: BrainRemember) -> Result<BrainRememberResult> {
+        let result = self.inner.brain.remember(request)?;
+        self.record_audit(
+            "brain.remember",
+            "info",
+            "brain record stored",
+            0.05,
+            json!({ "digest": result.digest }).to_string(),
+        )?;
+        Ok(result)
+    }
+
+    pub fn recall_brain(&self, query: BrainRecallQuery) -> Result<BrainRecallResult> {
+        self.inner.brain.recall(query)
+    }
+
+    pub fn suggest_brain(&self, query: BrainSuggestQuery) -> Result<BrainSuggestResult> {
+        self.inner.brain.suggest(query)
+    }
+
+    pub fn list_brain_tasks(&self, query: BrainTaskListQuery) -> Result<BrainTaskListResult> {
+        self.inner.brain.list_task_records(query)
+    }
+
+    pub fn update_brain_task(&self, request: BrainTaskUpdate) -> Result<BrainTaskRecord> {
+        let task = self.inner.brain.update_task_record(request)?;
+        self.record_audit(
+            "brain.task",
+            "info",
+            "brain task updated",
+            0.05,
+            json!({ "task_id": task.id, "status": task.status }).to_string(),
+        )?;
+        Ok(task)
+    }
+
+    pub fn forget_brain(&self, request: BrainForget) -> Result<BrainForgetResult> {
+        let result = self.inner.brain.forget(request)?;
+        self.record_audit(
+            "brain.forget",
+            "info",
+            "brain record forgotten",
+            0.08,
+            json!({ "target_id": result.target_id, "mode": result.mode }).to_string(),
+        )?;
+        Ok(result)
     }
 
     pub fn attest_session(
@@ -583,6 +679,158 @@ impl EngineRuntimeService for RuntimeRpcService {
         }))
     }
 
+    async fn remember_brain(
+        &self,
+        request: Request<BrainRememberRequest>,
+    ) -> Result<Response<BrainRememberResponse>, Status> {
+        let request = request.into_inner();
+        let result = self
+            .engine
+            .remember_brain(BrainRemember {
+                kind: request.kind,
+                subtype: request.subtype,
+                title: request.title,
+                content: request.content,
+                importance: request.importance,
+                scope_json: request.scope_json,
+                links_json: request.links_json,
+                source_ref: request.source_ref,
+            })
+            .map_err(internal_status)?;
+        Ok(Response::new(BrainRememberResponse {
+            stored: result.stored,
+            entity: result.entity.map(proto_brain_entity),
+            task: result.task.map(proto_brain_task),
+            digest: result.digest,
+        }))
+    }
+
+    async fn recall_brain(
+        &self,
+        request: Request<BrainRecallRequest>,
+    ) -> Result<Response<BrainRecallResponse>, Status> {
+        let request = request.into_inner();
+        let result = self
+            .engine
+            .recall_brain(BrainRecallQuery {
+                query: request.query,
+                scope_json: request.scope_json,
+                limit: request.limit as usize,
+                include_archived: request.include_archived,
+            })
+            .map_err(internal_status)?;
+        Ok(Response::new(BrainRecallResponse {
+            summary: result.summary,
+            entities: result
+                .entities
+                .into_iter()
+                .map(proto_brain_entity)
+                .collect(),
+            facts: result.facts.into_iter().map(proto_brain_fact).collect(),
+            relations: result
+                .relations
+                .into_iter()
+                .map(proto_brain_relation)
+                .collect(),
+            tasks: result.tasks.into_iter().map(proto_brain_task).collect(),
+        }))
+    }
+
+    async fn suggest_brain(
+        &self,
+        request: Request<BrainSuggestRequest>,
+    ) -> Result<Response<BrainSuggestResponse>, Status> {
+        let request = request.into_inner();
+        let result = self
+            .engine
+            .suggest_brain(BrainSuggestQuery {
+                scope_json: request.scope_json,
+                limit: request.limit as usize,
+            })
+            .map_err(internal_status)?;
+        Ok(Response::new(BrainSuggestResponse {
+            summary: result.summary,
+            suggestions: result
+                .suggestions
+                .into_iter()
+                .map(proto_brain_suggestion)
+                .collect(),
+        }))
+    }
+
+    async fn list_brain_tasks(
+        &self,
+        request: Request<BrainTaskListRequest>,
+    ) -> Result<Response<BrainTaskListResponse>, Status> {
+        let request = request.into_inner();
+        let result = self
+            .engine
+            .list_brain_tasks(BrainTaskListQuery {
+                scope_json: request.scope_json,
+                statuses: request.statuses,
+                priorities: request.priorities,
+                due_before: if request.due_before.is_empty() {
+                    None
+                } else {
+                    Some(parse_timestamp(&request.due_before).map_err(internal_status)?)
+                },
+                limit: request.limit as usize,
+            })
+            .map_err(internal_status)?;
+        Ok(Response::new(BrainTaskListResponse {
+            summary: result.summary,
+            tasks: result.tasks.into_iter().map(proto_brain_task).collect(),
+        }))
+    }
+
+    async fn update_brain_task(
+        &self,
+        request: Request<BrainTaskUpdateRequest>,
+    ) -> Result<Response<BrainTaskUpdateResponse>, Status> {
+        let request = request.into_inner();
+        let task = self
+            .engine
+            .update_brain_task(BrainTaskUpdate {
+                task_id: request.task_id,
+                status: request.status,
+                priority: request.priority,
+                due_at: if request.due_at.is_empty() {
+                    None
+                } else {
+                    Some(parse_timestamp(&request.due_at).map_err(internal_status)?)
+                },
+                summary: request.summary,
+                links_json: request.links_json,
+                source_ref: request.source_ref,
+            })
+            .map_err(internal_status)?;
+        Ok(Response::new(BrainTaskUpdateResponse {
+            updated: true,
+            task: Some(proto_brain_task(task)),
+        }))
+    }
+
+    async fn forget_brain(
+        &self,
+        request: Request<BrainForgetRequest>,
+    ) -> Result<Response<BrainForgetResponse>, Status> {
+        let request = request.into_inner();
+        let result = self
+            .engine
+            .forget_brain(BrainForget {
+                target_kind: request.target_kind,
+                target_id: request.target_id,
+                mode: request.mode,
+                reason: request.reason,
+            })
+            .map_err(internal_status)?;
+        Ok(Response::new(BrainForgetResponse {
+            forgotten: result.forgotten,
+            mode: result.mode,
+            target_id: result.target_id,
+        }))
+    }
+
     async fn run_agent_protocol(
         &self,
         request: Request<AgentProtocolRequest>,
@@ -731,6 +979,82 @@ fn proto_memory_record(record: MemoryRecord) -> ProtoMemoryRecord {
     }
 }
 
+fn proto_brain_entity(record: BrainEntityRecord) -> BrainEntity {
+    BrainEntity {
+        id: record.id,
+        kind: record.kind,
+        subtype: record.subtype,
+        title: record.title,
+        content: record.content,
+        scope_json: record.scope_json,
+        links_json: record.links_json,
+        salience: record.salience,
+        confidence: record.confidence,
+        archived: record.archived,
+        created_at: record.created_at.to_rfc3339(),
+        updated_at: record.updated_at.to_rfc3339(),
+    }
+}
+
+fn proto_brain_fact(record: BrainFactRecord) -> BrainFact {
+    BrainFact {
+        id: record.id,
+        entity_id: record.entity_id,
+        content: record.content,
+        scope_json: record.scope_json,
+        salience: record.salience,
+        confidence: record.confidence,
+        archived: record.archived,
+        created_at: record.created_at.to_rfc3339(),
+        updated_at: record.updated_at.to_rfc3339(),
+    }
+}
+
+fn proto_brain_relation(record: BrainRelationRecord) -> BrainRelation {
+    BrainRelation {
+        id: record.id,
+        kind: record.kind,
+        from_id: record.from_id,
+        to_id: record.to_id,
+        metadata_json: record.metadata_json,
+        confidence: record.confidence,
+        created_at: record.created_at.to_rfc3339(),
+        updated_at: record.updated_at.to_rfc3339(),
+    }
+}
+
+fn proto_brain_task(record: BrainTaskRecord) -> BrainTask {
+    BrainTask {
+        id: record.id,
+        title: record.title,
+        summary: record.summary,
+        status: record.status,
+        priority: record.priority,
+        due_at: record
+            .due_at
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_default(),
+        scope_json: record.scope_json,
+        links_json: record.links_json,
+        salience: record.salience,
+        confidence: record.confidence,
+        archived: record.archived,
+        created_at: record.created_at.to_rfc3339(),
+        updated_at: record.updated_at.to_rfc3339(),
+    }
+}
+
+fn proto_brain_suggestion(record: BrainSuggestionRecord) -> BrainSuggestion {
+    BrainSuggestion {
+        id: record.id,
+        task_id: record.task_id,
+        summary: record.summary,
+        reason: record.reason,
+        score: record.score,
+        context_json: record.context_json,
+    }
+}
+
 fn proto_audit_event(event: AuditEvent) -> ProtoAuditEvent {
     ProtoAuditEvent {
         id: event.id,
@@ -838,6 +1162,64 @@ impl StateStore {
                 protocol_id text not null,
                 transcript_json text not null,
                 findings_json text not null,
+                created_at text not null
+            );
+            create table if not exists brain_entities (
+                entity_id text primary key,
+                entity_kind text not null,
+                subtype text not null,
+                encrypted_blob_json text not null,
+                salience real not null,
+                confidence real not null,
+                fingerprint text not null,
+                archived integer not null,
+                source_ref text not null,
+                created_at text not null,
+                updated_at text not null
+            );
+            create table if not exists brain_facts (
+                fact_id text primary key,
+                entity_id text not null,
+                encrypted_blob_json text not null,
+                salience real not null,
+                confidence real not null,
+                fingerprint text not null,
+                archived integer not null,
+                source_ref text not null,
+                created_at text not null,
+                updated_at text not null
+            );
+            create table if not exists brain_relations (
+                relation_id text primary key,
+                relation_kind text not null,
+                from_entity_id text not null,
+                to_entity_id text not null,
+                metadata_json text not null,
+                confidence real not null,
+                archived integer not null,
+                created_at text not null,
+                updated_at text not null,
+                unique (relation_kind, from_entity_id, to_entity_id)
+            );
+            create table if not exists brain_tasks (
+                task_id text primary key,
+                status text not null,
+                priority text not null,
+                due_at text,
+                encrypted_blob_json text not null,
+                salience real not null,
+                confidence real not null,
+                fingerprint text not null,
+                archived integer not null,
+                source_ref text not null,
+                created_at text not null,
+                updated_at text not null
+            );
+            create table if not exists brain_ingest_log (
+                source_ref text primary key,
+                source_kind text not null,
+                fingerprint text not null,
+                target_json text not null,
                 created_at text not null
             );
             "#,
@@ -1091,6 +1473,2038 @@ impl StateStore {
     }
 }
 
+#[derive(Clone)]
+struct BrainManager {
+    inner: Arc<BrainInner>,
+}
+
+struct BrainInner {
+    config: BrainConfig,
+    paths: OpenPinchPaths,
+    state: StateStore,
+    encryption: EncryptionManager,
+    owner_id: String,
+    runtime_env_id: String,
+    workspace_env_id: String,
+    project_env_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BrainEntityPayload {
+    title: String,
+    content: String,
+    scope_json: String,
+    links_json: String,
+    source_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BrainFactPayload {
+    content: String,
+    scope_json: String,
+    source_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BrainTaskPayload {
+    title: String,
+    summary: String,
+    scope_json: String,
+    links_json: String,
+    source_ref: String,
+}
+
+struct EntityUpsert {
+    entity_id: String,
+    kind: String,
+    subtype: String,
+    title: String,
+    content: String,
+    scope_json: String,
+    links_json: String,
+    salience: f64,
+    confidence: f64,
+    source_ref: String,
+}
+
+struct FactUpsert {
+    fact_id: String,
+    entity_id: String,
+    content: String,
+    scope_json: String,
+    salience: f64,
+    confidence: f64,
+    source_ref: String,
+}
+
+struct TaskUpsert {
+    task_id: Option<String>,
+    title: String,
+    summary: String,
+    status: String,
+    priority: String,
+    due_at: Option<DateTime<Utc>>,
+    scope_json: String,
+    links_json: String,
+    salience: f64,
+    confidence: f64,
+    source_ref: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProjectionHit {
+    key: String,
+}
+
+impl BrainManager {
+    fn new(
+        config: &AppConfig,
+        paths: &OpenPinchPaths,
+        state: StateStore,
+        encryption: EncryptionManager,
+    ) -> Result<Self> {
+        let workspace_root = std::env::current_dir().unwrap_or_else(|_| paths.data_dir.clone());
+        let workspace_raw = workspace_root.display().to_string();
+        let workspace_name = workspace_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("workspace")
+            .to_owned();
+        let inner = Arc::new(BrainInner {
+            config: config.brain.clone(),
+            paths: paths.clone(),
+            state,
+            encryption,
+            owner_id: "person:owner:local".to_owned(),
+            runtime_env_id: format!("environment:runtime:{}", std::env::consts::OS),
+            workspace_env_id: format!("environment:workspace:{}", prompt_hash(&workspace_raw)),
+            project_env_id: format!("environment:project:{}", prompt_hash(&workspace_name)),
+        });
+        let manager = Self { inner };
+        manager.ensure_baseline_context()?;
+        Ok(manager)
+    }
+
+    fn enabled(&self) -> bool {
+        self.inner.config.enabled
+    }
+
+    fn remember(&self, request: BrainRemember) -> Result<BrainRememberResult> {
+        if !self.enabled() {
+            bail!("brain is disabled");
+        }
+
+        self.apply_retention()?;
+
+        let source_ref = default_source_ref(
+            &request.source_ref,
+            &format!(
+                "{}:{}:{}:{}",
+                request.kind, request.subtype, request.title, request.content
+            ),
+            "remember",
+        );
+        let digest = prompt_hash(&format!(
+            "{}:{}:{}:{}:{}",
+            request.kind, request.subtype, request.title, request.content, source_ref
+        ));
+
+        if request.kind == "task" {
+            let task = self.upsert_or_merge_task(TaskUpsert {
+                task_id: None,
+                title: preferred_title(&request.title, &request.content),
+                summary: non_empty_or_default(&request.content, &request.title),
+                status: "open".to_owned(),
+                priority: task_priority_from_text(&request.content),
+                due_at: parse_due_at(&request.content),
+                scope_json: if request.scope_json.is_empty() {
+                    "{}".to_owned()
+                } else {
+                    request.scope_json.clone()
+                },
+                links_json: request.links_json.clone(),
+                salience: request.importance.max(0.45),
+                confidence: 0.92,
+                source_ref: default_source_ref(&source_ref, &request.title, "task"),
+            })?;
+            self.record_ingest(
+                &source_ref,
+                "remember",
+                &digest,
+                &json!({ "task_id": task.id }).to_string(),
+            )?;
+            return Ok(BrainRememberResult {
+                stored: true,
+                entity: None,
+                task: Some(task),
+                digest,
+            });
+        }
+
+        validate_entity_kind(&request.kind)?;
+        if request.kind == "environment" && !request.subtype.is_empty() {
+            validate_environment_subtype(&request.subtype)?;
+        }
+        let scope_json = if request.scope_json.is_empty() {
+            "{}".to_owned()
+        } else {
+            request.scope_json.clone()
+        };
+        let links_json = if request.links_json.is_empty() {
+            "[]".to_owned()
+        } else {
+            request.links_json.clone()
+        };
+        let entity_id = format!(
+            "{}:{}:{}",
+            request.kind,
+            request.subtype,
+            prompt_hash(&format!("{}:{}", request.title, scope_json))
+        );
+        let entity = self.upsert_entity(EntityUpsert {
+            entity_id,
+            kind: request.kind.clone(),
+            subtype: request.subtype.clone(),
+            title: preferred_title(&request.title, &request.content),
+            content: request.content.clone(),
+            scope_json: scope_json.clone(),
+            links_json: links_json.clone(),
+            salience: request.importance.max(0.4),
+            confidence: 0.95,
+            source_ref: source_ref.clone(),
+        })?;
+        let fact_id = format!(
+            "fact:{}:{}",
+            entity.id,
+            prompt_hash(&format!("{}:{}", source_ref, request.content))
+        );
+        let _ = self.upsert_fact(FactUpsert {
+            fact_id,
+            entity_id: entity.id.clone(),
+            content: request.content.clone(),
+            scope_json: scope_json.clone(),
+            salience: request.importance.max(0.35),
+            confidence: 0.9,
+            source_ref: source_ref.clone(),
+        })?;
+        self.link_record(&entity.id, &request.kind, &links_json, &source_ref)?;
+        self.record_ingest(
+            &source_ref,
+            "remember",
+            &digest,
+            &json!({ "entity_id": entity.id }).to_string(),
+        )?;
+        Ok(BrainRememberResult {
+            stored: true,
+            entity: Some(entity),
+            task: None,
+            digest,
+        })
+    }
+
+    fn recall(&self, query: BrainRecallQuery) -> Result<BrainRecallResult> {
+        if !self.enabled() {
+            bail!("brain is disabled");
+        }
+
+        self.apply_retention()?;
+
+        let limit = query.limit.max(1);
+        let entities = self.list_entities(query.include_archived)?;
+        let facts = self.list_facts(query.include_archived)?;
+        let tasks = self.list_tasks(false)?;
+        let relations = self.list_relations(query.include_archived)?;
+
+        let entity_hits = self.query_projection_hits("brain-entities", &query.query, limit * 3)?;
+        let fact_hits = self.query_projection_hits("brain-facts", &query.query, limit * 3)?;
+        let task_hits = self.query_projection_hits("brain-tasks", &query.query, limit * 3)?;
+
+        let entity_map = entities
+            .iter()
+            .cloned()
+            .map(|record| (record.id.clone(), record))
+            .collect::<BTreeMap<_, _>>();
+        let fact_map = facts
+            .iter()
+            .cloned()
+            .map(|record| (record.id.clone(), record))
+            .collect::<BTreeMap<_, _>>();
+        let task_map = tasks
+            .iter()
+            .cloned()
+            .map(|record| (record.id.clone(), record))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut matched_entities = Vec::new();
+        let mut matched_facts = Vec::new();
+        let mut matched_tasks = Vec::new();
+        let mut selected_ids = BTreeSet::new();
+
+        for hit in entity_hits {
+            if matched_entities.len() >= limit {
+                break;
+            }
+            if let Some(entity) = entity_map.get(&hit.key) {
+                if scope_matches(&entity.scope_json, &query.scope_json) {
+                    matched_entities.push(entity.clone());
+                    selected_ids.insert(entity.id.clone());
+                }
+            }
+        }
+
+        for hit in fact_hits {
+            if matched_facts.len() >= limit {
+                break;
+            }
+            if let Some(fact) = fact_map.get(&hit.key) {
+                if scope_matches(&fact.scope_json, &query.scope_json) {
+                    matched_facts.push(fact.clone());
+                    selected_ids.insert(fact.entity_id.clone());
+                    if let Some(entity) = entity_map.get(&fact.entity_id) {
+                        if !matched_entities.iter().any(|item| item.id == entity.id)
+                            && matched_entities.len() < limit
+                        {
+                            matched_entities.push(entity.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        for hit in task_hits {
+            if matched_tasks.len() >= limit {
+                break;
+            }
+            if let Some(task) = task_map.get(&hit.key) {
+                if scope_matches(&task.scope_json, &query.scope_json) {
+                    matched_tasks.push(task.clone());
+                    selected_ids.insert(task.id.clone());
+                    for linked in parse_link_ids(&task.links_json) {
+                        selected_ids.insert(linked);
+                    }
+                }
+            }
+        }
+
+        for relation in &relations {
+            if selected_ids.contains(&relation.from_id) || selected_ids.contains(&relation.to_id) {
+                if let Some(entity) = entity_map.get(&relation.from_id) {
+                    if !matched_entities.iter().any(|item| item.id == entity.id)
+                        && matched_entities.len() < limit
+                    {
+                        matched_entities.push(entity.clone());
+                    }
+                }
+                if let Some(entity) = entity_map.get(&relation.to_id) {
+                    if !matched_entities.iter().any(|item| item.id == entity.id)
+                        && matched_entities.len() < limit
+                    {
+                        matched_entities.push(entity.clone());
+                    }
+                }
+            }
+        }
+
+        let matched_relations = relations
+            .into_iter()
+            .filter(|relation| {
+                selected_ids.contains(&relation.from_id) || selected_ids.contains(&relation.to_id)
+            })
+            .take(limit * 2)
+            .collect::<Vec<_>>();
+
+        Ok(BrainRecallResult {
+            summary: build_recall_summary(&matched_entities, &matched_facts, &matched_tasks),
+            entities: matched_entities,
+            facts: matched_facts,
+            relations: matched_relations,
+            tasks: matched_tasks,
+        })
+    }
+
+    fn suggest(&self, query: BrainSuggestQuery) -> Result<BrainSuggestResult> {
+        if !self.enabled() {
+            bail!("brain is disabled");
+        }
+
+        self.apply_retention()?;
+
+        let limit = query.limit.max(1);
+        let tasks = self
+            .list_tasks(false)?
+            .into_iter()
+            .filter(|task| matches!(task.status.as_str(), "open" | "in_progress" | "blocked"))
+            .filter(|task| scope_matches(&task.scope_json, &query.scope_json))
+            .collect::<Vec<_>>();
+        let entities = self
+            .list_entities(false)?
+            .into_iter()
+            .map(|entity| (entity.id.clone(), entity))
+            .collect::<BTreeMap<_, _>>();
+
+        let now = Utc::now();
+        let mut suggestions = tasks
+            .into_iter()
+            .map(|task| {
+                let stale =
+                    (now - task.updated_at).num_hours() >= self.inner.config.stale_task_hours;
+                let due_bonus = task
+                    .due_at
+                    .map(|due| {
+                        if due <= now {
+                            0.35
+                        } else if due <= now + Duration::hours(24) {
+                            0.2
+                        } else {
+                            0.0
+                        }
+                    })
+                    .unwrap_or(0.0);
+                let stale_bonus = if stale { 0.1 } else { 0.0 };
+                let blocked_bonus = if task.status == "blocked" { 0.15 } else { 0.0 };
+                let score = (task.salience * 0.4)
+                    + (task.confidence * 0.2)
+                    + (priority_weight(&task.priority) * 0.25)
+                    + due_bonus
+                    + stale_bonus
+                    + blocked_bonus;
+                let linked_titles = parse_link_ids(&task.links_json)
+                    .into_iter()
+                    .filter_map(|id| entities.get(&id))
+                    .map(|record| record.title.clone())
+                    .collect::<Vec<_>>();
+                let reason = suggestion_reason(&task, stale, due_bonus, blocked_bonus);
+                let context_json = json!({
+                    "task_status": task.status,
+                    "priority": task.priority,
+                    "due_at": task.due_at.map(|due| due.to_rfc3339()),
+                    "linked_entities": linked_titles,
+                })
+                .to_string();
+                BrainSuggestionRecord {
+                    id: format!("suggestion:{}", task.id),
+                    task_id: task.id.clone(),
+                    summary: task.summary.clone(),
+                    reason,
+                    score,
+                    context_json,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        suggestions.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(Ordering::Equal)
+        });
+        suggestions.truncate(limit);
+
+        for suggestion in &suggestions {
+            let projection = format!(
+                "{} {} {}",
+                suggestion.summary, suggestion.reason, suggestion.context_json
+            );
+            let _ = self.upsert_projection(
+                "brain-suggestions",
+                &suggestion.id,
+                &projection,
+                &json!({ "task_id": suggestion.task_id, "score": suggestion.score }).to_string(),
+            );
+        }
+
+        Ok(BrainSuggestResult {
+            summary: format!("{} next actions suggested", suggestions.len()),
+            suggestions,
+        })
+    }
+
+    fn list_task_records(&self, query: BrainTaskListQuery) -> Result<BrainTaskListResult> {
+        if !self.enabled() {
+            bail!("brain is disabled");
+        }
+
+        self.apply_retention()?;
+
+        let limit = query.limit.max(1);
+        let mut tasks = self
+            .list_tasks(false)?
+            .into_iter()
+            .filter(|task| scope_matches(&task.scope_json, &query.scope_json))
+            .filter(|task| {
+                query.statuses.is_empty()
+                    || query.statuses.iter().any(|status| status == &task.status)
+            })
+            .filter(|task| {
+                query.priorities.is_empty()
+                    || query
+                        .priorities
+                        .iter()
+                        .any(|priority| priority == &task.priority)
+            })
+            .filter(|task| {
+                query
+                    .due_before
+                    .map(|due_before| task.due_at.map(|due| due <= due_before).unwrap_or(false))
+                    .unwrap_or(true)
+            })
+            .collect::<Vec<_>>();
+        tasks.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        tasks.truncate(limit);
+        Ok(BrainTaskListResult {
+            summary: format!("{} tasks matched", tasks.len()),
+            tasks,
+        })
+    }
+
+    fn update_task_record(&self, request: BrainTaskUpdate) -> Result<BrainTaskRecord> {
+        if !self.enabled() {
+            bail!("brain is disabled");
+        }
+
+        validate_task_status(&request.status)?;
+        let priority = if request.priority.is_empty() {
+            "normal".to_owned()
+        } else {
+            request.priority
+        };
+        let task_id = if request.task_id.is_empty() {
+            format!("task:{}", prompt_hash(&request.summary))
+        } else {
+            request.task_id
+        };
+        let existing = self
+            .list_tasks(true)?
+            .into_iter()
+            .find(|task| task.id == task_id);
+        let scope_json = existing
+            .as_ref()
+            .map(|task| task.scope_json.clone())
+            .unwrap_or_else(|| "{}".to_owned());
+        let links_json = if request.links_json.is_empty() {
+            existing
+                .as_ref()
+                .map(|task| task.links_json.clone())
+                .unwrap_or_else(|| "[]".to_owned())
+        } else {
+            request.links_json
+        };
+        let summary = non_empty_or_default(
+            &request.summary,
+            &existing
+                .as_ref()
+                .map(|task| task.summary.clone())
+                .unwrap_or_else(|| task_id.clone()),
+        );
+        let task = self.upsert_task(TaskUpsert {
+            task_id: Some(task_id.clone()),
+            title: preferred_title(&summary, &summary),
+            summary,
+            status: request.status,
+            priority,
+            due_at: request
+                .due_at
+                .or_else(|| existing.as_ref().and_then(|task| task.due_at)),
+            scope_json,
+            links_json: links_json.clone(),
+            salience: 0.8,
+            confidence: 0.95,
+            source_ref: default_source_ref(&request.source_ref, &task_id, "task-update"),
+        })?;
+        self.link_record(
+            &task.id,
+            "task",
+            &links_json,
+            &default_source_ref(&request.source_ref, &task.id, "task-update"),
+        )?;
+        Ok(task)
+    }
+
+    fn forget(&self, request: BrainForget) -> Result<BrainForgetResult> {
+        if !self.enabled() {
+            bail!("brain is disabled");
+        }
+
+        let mode = if request.mode.is_empty() {
+            "archive".to_owned()
+        } else {
+            request.mode
+        };
+        let target_kind = normalize_forget_target_kind(&request.target_kind);
+        let connection = self.inner.state.connection.lock();
+        match (target_kind.as_str(), mode.as_str()) {
+            ("entity", "archive") => {
+                connection.execute(
+                    "update brain_entities set archived = 1, updated_at = ?2 where entity_id = ?1",
+                    params![request.target_id, Utc::now().to_rfc3339()],
+                )?;
+                connection.execute(
+                    "update brain_facts set archived = 1, updated_at = ?2 where entity_id = ?1",
+                    params![request.target_id, Utc::now().to_rfc3339()],
+                )?;
+                connection.execute(
+                    "update brain_relations set archived = 1, updated_at = ?2 where from_entity_id = ?1 or to_entity_id = ?1",
+                    params![request.target_id, Utc::now().to_rfc3339()],
+                )?;
+            }
+            ("task", "archive") => {
+                connection.execute(
+                    "update brain_tasks set archived = 1, updated_at = ?2 where task_id = ?1",
+                    params![request.target_id, Utc::now().to_rfc3339()],
+                )?;
+            }
+            ("fact", "archive") => {
+                connection.execute(
+                    "update brain_facts set archived = 1, updated_at = ?2 where fact_id = ?1",
+                    params![request.target_id, Utc::now().to_rfc3339()],
+                )?;
+            }
+            ("relation", "archive") => {
+                connection.execute(
+                    "update brain_relations set archived = 1, updated_at = ?2 where relation_id = ?1",
+                    params![request.target_id, Utc::now().to_rfc3339()],
+                )?;
+            }
+            ("entity", "delete") => {
+                connection.execute(
+                    "delete from brain_facts where entity_id = ?1",
+                    params![request.target_id],
+                )?;
+                connection.execute(
+                    "delete from brain_relations where from_entity_id = ?1 or to_entity_id = ?1",
+                    params![request.target_id],
+                )?;
+                connection.execute(
+                    "delete from brain_entities where entity_id = ?1",
+                    params![request.target_id],
+                )?;
+            }
+            ("task", "delete") => {
+                connection.execute(
+                    "delete from brain_tasks where task_id = ?1",
+                    params![request.target_id],
+                )?;
+                connection.execute(
+                    "delete from brain_relations where from_entity_id = ?1 or to_entity_id = ?1",
+                    params![request.target_id],
+                )?;
+            }
+            ("fact", "delete") => {
+                connection.execute(
+                    "delete from brain_facts where fact_id = ?1",
+                    params![request.target_id],
+                )?;
+            }
+            ("relation", "delete") => {
+                connection.execute(
+                    "delete from brain_relations where relation_id = ?1",
+                    params![request.target_id],
+                )?;
+            }
+            _ => bail!("unsupported forget mode {} for {}", mode, target_kind),
+        }
+        drop(connection);
+
+        if mode == "delete" {
+            let _ = self.delete_projection("brain-entities", &request.target_id);
+            let _ = self.delete_projection("brain-facts", &request.target_id);
+            let _ = self.delete_projection("brain-tasks", &request.target_id);
+            let _ = self.delete_projection(
+                "brain-suggestions",
+                &format!("suggestion:{}", request.target_id),
+            );
+        }
+
+        Ok(BrainForgetResult {
+            forgotten: true,
+            mode,
+            target_id: request.target_id,
+        })
+    }
+
+    fn ingest_message(&self, message: &MessageEnvelope) -> Result<()> {
+        if !self.enabled() || !self.inner.config.auto_ingest_messages {
+            return Ok(());
+        }
+
+        let source_ref = format!(
+            "message:{}:{}:{}:{}",
+            message.connector,
+            message.channel_id,
+            prompt_hash(&message.sender),
+            prompt_hash(&message.body)
+        );
+        let scope_json = self.scope_for_message(message);
+        let contact = self.upsert_entity(EntityUpsert {
+            entity_id: format!(
+                "person:contact:{}:{}",
+                message.connector,
+                prompt_hash(&message.sender)
+            ),
+            kind: "person".to_owned(),
+            subtype: "contact".to_owned(),
+            title: message.sender.clone(),
+            content: format!(
+                "Observed through {} in channel {}",
+                message.connector, message.channel_id
+            ),
+            scope_json: scope_json.clone(),
+            links_json: "[]".to_owned(),
+            salience: 0.58,
+            confidence: 0.96,
+            source_ref: source_ref.clone(),
+        })?;
+        self.upsert_relation(
+            "knows",
+            &self.inner.owner_id,
+            &contact.id,
+            &json!({ "connector": message.connector, "channel_id": message.channel_id })
+                .to_string(),
+            0.92,
+            false,
+        )?;
+        self.upsert_relation(
+            "mentioned_with",
+            &contact.id,
+            &self.inner.workspace_env_id,
+            &json!({ "source_ref": source_ref }).to_string(),
+            0.65,
+            false,
+        )?;
+        let _ = self.upsert_fact(FactUpsert {
+            fact_id: format!("fact:{}:{}", contact.id, prompt_hash(&source_ref)),
+            entity_id: contact.id.clone(),
+            content: message.body.clone(),
+            scope_json: scope_json.clone(),
+            salience: 0.62,
+            confidence: 0.84,
+            source_ref: source_ref.clone(),
+        })?;
+
+        let mut linked_ids = vec![contact.id.clone()];
+        for artifact in extract_artifacts(&message.body) {
+            let entity = self.upsert_entity(EntityUpsert {
+                entity_id: format!("artifact:{}", prompt_hash(&artifact)),
+                kind: "artifact".to_owned(),
+                subtype: "reference".to_owned(),
+                title: artifact.clone(),
+                content: format!("Referenced in inbound {} message", message.connector),
+                scope_json: scope_json.clone(),
+                links_json: "[]".to_owned(),
+                salience: 0.56,
+                confidence: 0.85,
+                source_ref: source_ref.clone(),
+            })?;
+            self.upsert_relation(
+                "mentioned_with",
+                &contact.id,
+                &entity.id,
+                &json!({ "source_ref": source_ref }).to_string(),
+                0.74,
+                false,
+            )?;
+            linked_ids.push(entity.id);
+        }
+
+        for (subtype, title) in extract_environment_mentions(&message.body) {
+            let entity = self.upsert_entity(EntityUpsert {
+                entity_id: format!("environment:{}:{}", subtype, prompt_hash(&title)),
+                kind: "environment".to_owned(),
+                subtype: subtype.clone(),
+                title: title.clone(),
+                content: format!("Mentioned {} context", subtype),
+                scope_json: scope_json.clone(),
+                links_json: "[]".to_owned(),
+                salience: 0.52,
+                confidence: 0.78,
+                source_ref: source_ref.clone(),
+            })?;
+            self.upsert_relation(
+                "mentioned_with",
+                &contact.id,
+                &entity.id,
+                &json!({ "source_ref": source_ref }).to_string(),
+                0.7,
+                false,
+            )?;
+            linked_ids.push(entity.id);
+        }
+
+        if let Some(summary) = extract_task_summary(&message.body) {
+            let task = self.upsert_or_merge_task(TaskUpsert {
+                task_id: None,
+                title: preferred_title(&summary, &summary),
+                summary,
+                status: "open".to_owned(),
+                priority: task_priority_from_text(&message.body),
+                due_at: parse_due_at(&message.body),
+                scope_json: scope_json.clone(),
+                links_json: serde_json::to_string(&linked_ids).unwrap_or_else(|_| "[]".to_owned()),
+                salience: 0.84,
+                confidence: 0.88,
+                source_ref: source_ref.clone(),
+            })?;
+            self.upsert_relation(
+                "assigned_to",
+                &task.id,
+                &self.inner.owner_id,
+                &json!({ "source_ref": source_ref }).to_string(),
+                0.86,
+                false,
+            )?;
+            self.upsert_relation(
+                "about",
+                &task.id,
+                &contact.id,
+                &json!({ "source_ref": source_ref }).to_string(),
+                0.78,
+                false,
+            )?;
+            linked_ids.push(task.id);
+        }
+
+        self.record_ingest(
+            &source_ref,
+            "message",
+            &fingerprint(&message.body),
+            &json!({ "linked_ids": linked_ids }).to_string(),
+        )
+    }
+
+    fn ingest_tool_result(&self, call: &ToolCall, outcome: &ToolOutcome) -> Result<()> {
+        if !self.enabled() || !self.inner.config.auto_ingest_tool_results || !outcome.success {
+            return Ok(());
+        }
+
+        let source_ref = format!(
+            "tool:{}:{}",
+            call.target,
+            prompt_hash(&format!("{}:{}", outcome.summary, outcome.data_json))
+        );
+        let scope_json = json!({
+            "source": "tool",
+            "target": call.target,
+            "priority": call.priority.as_str(),
+        })
+        .to_string();
+        let result_summary = non_empty_or_default(&outcome.summary, &call.target);
+        let artifact = self.upsert_entity(EntityUpsert {
+            entity_id: format!("artifact:tool:{}", prompt_hash(&call.target)),
+            kind: "artifact".to_owned(),
+            subtype: "tool-result".to_owned(),
+            title: call.target.clone(),
+            content: format!("Successful tool execution: {}", result_summary),
+            scope_json: scope_json.clone(),
+            links_json: "[]".to_owned(),
+            salience: 0.68,
+            confidence: 0.92,
+            source_ref: source_ref.clone(),
+        })?;
+        let _ = self.upsert_fact(FactUpsert {
+            fact_id: format!("fact:{}:{}", artifact.id, prompt_hash(&source_ref)),
+            entity_id: artifact.id.clone(),
+            content: truncate_with_ellipsis(
+                &format!("{} {}", result_summary, outcome.data_json),
+                400,
+            ),
+            scope_json: scope_json.clone(),
+            salience: 0.7,
+            confidence: 0.9,
+            source_ref: source_ref.clone(),
+        })?;
+        let _ = self.upsert_fact(FactUpsert {
+            fact_id: format!(
+                "fact:{}:{}",
+                self.inner.workspace_env_id,
+                prompt_hash(&call.target)
+            ),
+            entity_id: self.inner.workspace_env_id.clone(),
+            content: format!("Tool {} succeeded with {}", call.target, result_summary),
+            scope_json: scope_json.clone(),
+            salience: 0.58,
+            confidence: 0.86,
+            source_ref: source_ref.clone(),
+        })?;
+
+        if let Some(task) = self.find_related_tool_task(&call.target, &result_summary) {
+            let _ = self.upsert_task(TaskUpsert {
+                task_id: Some(task.id.clone()),
+                title: task.title.clone(),
+                summary: task.summary.clone(),
+                status: "done".to_owned(),
+                priority: task.priority.clone(),
+                due_at: task.due_at,
+                scope_json: task.scope_json.clone(),
+                links_json: task.links_json.clone(),
+                salience: task.salience,
+                confidence: 0.96,
+                source_ref: source_ref.clone(),
+            })?;
+        }
+
+        self.record_ingest(
+            &source_ref,
+            "tool",
+            &fingerprint(&format!("{} {}", outcome.summary, outcome.data_json)),
+            &json!({ "artifact_id": artifact.id }).to_string(),
+        )
+    }
+
+    fn ingest_assistant_reply(&self, message: &MessageEnvelope, reply: &str) -> Result<()> {
+        if !self.enabled() || !self.inner.config.auto_ingest_assistant_commitments {
+            return Ok(());
+        }
+
+        let source_ref = format!(
+            "assistant:{}:{}:{}",
+            message.connector,
+            message.channel_id,
+            prompt_hash(reply)
+        );
+        let scope_json = self.scope_for_message(message);
+        if let Some(summary) = extract_assistant_commitment(reply) {
+            let task = self.upsert_or_merge_task(TaskUpsert {
+                task_id: None,
+                title: preferred_title(&summary, reply),
+                summary: summary.clone(),
+                status: "in_progress".to_owned(),
+                priority: task_priority_from_text(reply),
+                due_at: parse_due_at(reply),
+                scope_json: scope_json.clone(),
+                links_json: serde_json::to_string(&vec![self.inner.owner_id.clone()])
+                    .unwrap_or_else(|_| "[]".to_owned()),
+                salience: 0.74,
+                confidence: 0.72,
+                source_ref: source_ref.clone(),
+            })?;
+            self.upsert_relation(
+                "assigned_to",
+                &task.id,
+                &self.inner.owner_id,
+                &json!({ "source_ref": source_ref }).to_string(),
+                0.78,
+                false,
+            )?;
+            self.record_ingest(
+                &source_ref,
+                "assistant",
+                &fingerprint(reply),
+                &json!({ "task_id": task.id }).to_string(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn build_context_pack(&self, query: &str, scope_json: &str) -> Result<String> {
+        if !self.enabled() {
+            return Ok(String::new());
+        }
+
+        let recall = self.recall(BrainRecallQuery {
+            query: query.to_owned(),
+            scope_json: scope_json.to_owned(),
+            limit: 3,
+            include_archived: false,
+        })?;
+        let suggestions = self.suggest(BrainSuggestQuery {
+            scope_json: scope_json.to_owned(),
+            limit: self.inner.config.max_inline_suggestions,
+        })?;
+
+        let mut lines = Vec::new();
+        if !recall.summary.is_empty() {
+            lines.push(format!("summary: {}", recall.summary));
+        }
+        for entity in recall.entities.iter().take(2) {
+            lines.push(format!(
+                "entity: {} ({}) - {}",
+                entity.title, entity.kind, entity.content
+            ));
+        }
+        for task in recall.tasks.iter().take(2) {
+            lines.push(format!(
+                "task: {} [{} / {}]",
+                task.summary, task.status, task.priority
+            ));
+        }
+        for suggestion in suggestions
+            .suggestions
+            .iter()
+            .take(self.inner.config.max_inline_suggestions)
+        {
+            lines.push(format!(
+                "suggestion: {} ({})",
+                suggestion.summary, suggestion.reason
+            ));
+        }
+
+        let mut content = lines.join("\n");
+        if content.len() > self.inner.config.context_budget_chars {
+            content = truncate_with_ellipsis(&content, self.inner.config.context_budget_chars);
+        }
+        Ok(content)
+    }
+
+    fn inline_suggestions(
+        &self,
+        scope_json: &str,
+        limit: usize,
+    ) -> Result<Vec<BrainSuggestionRecord>> {
+        Ok(self
+            .suggest(BrainSuggestQuery {
+                scope_json: scope_json.to_owned(),
+                limit,
+            })?
+            .suggestions
+            .into_iter()
+            .filter(|suggestion| suggestion.score >= 0.55)
+            .take(limit)
+            .collect())
+    }
+
+    fn ensure_baseline_context(&self) -> Result<()> {
+        let workspace_root =
+            std::env::current_dir().unwrap_or_else(|_| self.inner.paths.data_dir.clone());
+        let workspace_title = workspace_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("workspace")
+            .to_owned();
+        let runtime_scope = json!({
+            "scope": "runtime",
+            "os": std::env::consts::OS,
+        })
+        .to_string();
+        let workspace_scope = json!({
+            "scope": "workspace",
+            "path": workspace_root.display().to_string(),
+        })
+        .to_string();
+        let project_scope = json!({
+            "scope": "project",
+            "workspace": workspace_title,
+        })
+        .to_string();
+
+        let _ = self.upsert_entity(EntityUpsert {
+            entity_id: self.inner.owner_id.clone(),
+            kind: "person".to_owned(),
+            subtype: "owner".to_owned(),
+            title: "Local Owner".to_owned(),
+            content: "Primary local OpenPinch operator".to_owned(),
+            scope_json: "{}".to_owned(),
+            links_json: "[]".to_owned(),
+            salience: 0.95,
+            confidence: 0.99,
+            source_ref: "brain:baseline".to_owned(),
+        })?;
+        let _ = self.upsert_entity(EntityUpsert {
+            entity_id: self.inner.runtime_env_id.clone(),
+            kind: "environment".to_owned(),
+            subtype: "runtime".to_owned(),
+            title: format!("{} runtime", std::env::consts::OS),
+            content: format!("OpenPinch runtime on {}", std::env::consts::OS),
+            scope_json: runtime_scope,
+            links_json: "[]".to_owned(),
+            salience: 0.82,
+            confidence: 0.98,
+            source_ref: "brain:baseline".to_owned(),
+        })?;
+        let _ = self.upsert_entity(EntityUpsert {
+            entity_id: self.inner.workspace_env_id.clone(),
+            kind: "environment".to_owned(),
+            subtype: "workspace".to_owned(),
+            title: workspace_title.clone(),
+            content: format!("Workspace rooted at {}", workspace_root.display()),
+            scope_json: workspace_scope,
+            links_json: "[]".to_owned(),
+            salience: 0.84,
+            confidence: 0.98,
+            source_ref: "brain:baseline".to_owned(),
+        })?;
+        let _ = self.upsert_entity(EntityUpsert {
+            entity_id: self.inner.project_env_id.clone(),
+            kind: "environment".to_owned(),
+            subtype: "project".to_owned(),
+            title: workspace_title.clone(),
+            content: format!("Project context for {}", workspace_title),
+            scope_json: project_scope,
+            links_json: "[]".to_owned(),
+            salience: 0.8,
+            confidence: 0.94,
+            source_ref: "brain:baseline".to_owned(),
+        })?;
+        self.upsert_relation(
+            "owns",
+            &self.inner.owner_id,
+            &self.inner.workspace_env_id,
+            &json!({ "source_ref": "brain:baseline" }).to_string(),
+            0.96,
+            false,
+        )?;
+        self.upsert_relation(
+            "belongs_to",
+            &self.inner.workspace_env_id,
+            &self.inner.project_env_id,
+            &json!({ "source_ref": "brain:baseline" }).to_string(),
+            0.94,
+            false,
+        )?;
+        self.upsert_relation(
+            "runs_in",
+            &self.inner.project_env_id,
+            &self.inner.runtime_env_id,
+            &json!({ "source_ref": "brain:baseline" }).to_string(),
+            0.93,
+            false,
+        )?;
+        Ok(())
+    }
+
+    fn apply_retention(&self) -> Result<()> {
+        let cutoff =
+            (Utc::now() - Duration::days(self.inner.config.archive_decay_days)).to_rfc3339();
+        let connection = self.inner.state.connection.lock();
+        connection.execute(
+            "update brain_entities set archived = 1, updated_at = ?2
+             where archived = 0 and salience < 0.35 and updated_at < ?1",
+            params![cutoff, Utc::now().to_rfc3339()],
+        )?;
+        connection.execute(
+            "update brain_facts set archived = 1, updated_at = ?2
+             where archived = 0 and salience < 0.35 and updated_at < ?1",
+            params![cutoff, Utc::now().to_rfc3339()],
+        )?;
+        connection.execute(
+            "update brain_tasks set archived = 1, updated_at = ?2
+             where archived = 0 and salience < 0.5 and status in ('done', 'cancelled') and updated_at < ?1",
+            params![cutoff, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    fn scope_for_message(&self, message: &MessageEnvelope) -> String {
+        json!({
+            "connector": message.connector,
+            "channel_id": message.channel_id,
+            "sender": message.sender,
+        })
+        .to_string()
+    }
+
+    fn record_ingest(
+        &self,
+        source_ref: &str,
+        source_kind: &str,
+        fingerprint_value: &str,
+        target_json: &str,
+    ) -> Result<()> {
+        let connection = self.inner.state.connection.lock();
+        connection.execute(
+            "insert into brain_ingest_log (source_ref, source_kind, fingerprint, target_json, created_at) values (?1, ?2, ?3, ?4, ?5)
+             on conflict(source_ref) do update set source_kind = excluded.source_kind, fingerprint = excluded.fingerprint, target_json = excluded.target_json, created_at = excluded.created_at",
+            params![source_ref, source_kind, fingerprint_value, target_json, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    fn upsert_entity(&self, input: EntityUpsert) -> Result<BrainEntityRecord> {
+        validate_entity_kind(&input.kind)?;
+        if input.kind == "environment" && !input.subtype.is_empty() {
+            validate_environment_subtype(&input.subtype)?;
+        }
+        let payload = BrainEntityPayload {
+            title: input.title.clone(),
+            content: input.content.clone(),
+            scope_json: input.scope_json.clone(),
+            links_json: input.links_json.clone(),
+            source_ref: input.source_ref.clone(),
+        };
+        let encrypted_blob_json = self.encrypt_payload(&payload)?;
+        let now = Utc::now();
+        let connection = self.inner.state.connection.lock();
+        connection.execute(
+            "insert into brain_entities (entity_id, entity_kind, subtype, encrypted_blob_json, salience, confidence, fingerprint, archived, source_ref, created_at, updated_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?9)
+             on conflict(entity_id) do update set entity_kind = excluded.entity_kind, subtype = excluded.subtype, encrypted_blob_json = excluded.encrypted_blob_json, salience = excluded.salience, confidence = excluded.confidence, fingerprint = excluded.fingerprint, archived = 0, source_ref = excluded.source_ref, updated_at = excluded.updated_at",
+            params![
+                input.entity_id,
+                input.kind,
+                input.subtype,
+                encrypted_blob_json,
+                input.salience,
+                input.confidence,
+                fingerprint(&format!(
+                    "{} {} {}",
+                    input.title, input.content, input.scope_json
+                )),
+                input.source_ref,
+                now.to_rfc3339(),
+            ],
+        )?;
+        drop(connection);
+
+        let record = BrainEntityRecord {
+            id: input.entity_id,
+            kind: input.kind,
+            subtype: input.subtype,
+            title: input.title,
+            content: input.content,
+            scope_json: input.scope_json,
+            links_json: input.links_json,
+            salience: input.salience,
+            confidence: input.confidence,
+            archived: false,
+            created_at: now,
+            updated_at: now,
+        };
+        self.upsert_projection(
+            "brain-entities",
+            &record.id,
+            &entity_projection(&record),
+            &json!({ "kind": record.kind, "subtype": record.subtype }).to_string(),
+        )?;
+        Ok(record)
+    }
+
+    fn upsert_fact(&self, input: FactUpsert) -> Result<BrainFactRecord> {
+        let payload = BrainFactPayload {
+            content: input.content.clone(),
+            scope_json: input.scope_json.clone(),
+            source_ref: input.source_ref.clone(),
+        };
+        let encrypted_blob_json = self.encrypt_payload(&payload)?;
+        let now = Utc::now();
+        let connection = self.inner.state.connection.lock();
+        connection.execute(
+            "insert into brain_facts (fact_id, entity_id, encrypted_blob_json, salience, confidence, fingerprint, archived, source_ref, created_at, updated_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?8)
+             on conflict(fact_id) do update set entity_id = excluded.entity_id, encrypted_blob_json = excluded.encrypted_blob_json, salience = excluded.salience, confidence = excluded.confidence, fingerprint = excluded.fingerprint, archived = 0, source_ref = excluded.source_ref, updated_at = excluded.updated_at",
+            params![
+                input.fact_id,
+                input.entity_id,
+                encrypted_blob_json,
+                input.salience,
+                input.confidence,
+                fingerprint(&input.content),
+                input.source_ref,
+                now.to_rfc3339(),
+            ],
+        )?;
+        drop(connection);
+
+        let record = BrainFactRecord {
+            id: input.fact_id,
+            entity_id: input.entity_id,
+            content: input.content,
+            scope_json: input.scope_json,
+            salience: input.salience,
+            confidence: input.confidence,
+            archived: false,
+            created_at: now,
+            updated_at: now,
+        };
+        self.upsert_projection(
+            "brain-facts",
+            &record.id,
+            &fact_projection(&record),
+            &json!({ "entity_id": record.entity_id }).to_string(),
+        )?;
+        Ok(record)
+    }
+
+    fn upsert_relation(
+        &self,
+        kind: &str,
+        from_id: &str,
+        to_id: &str,
+        metadata_json: &str,
+        confidence: f64,
+        archived: bool,
+    ) -> Result<BrainRelationRecord> {
+        validate_relation_kind(kind)?;
+        let relation_id = format!(
+            "relation:{}",
+            prompt_hash(&format!("{}:{}:{}", kind, from_id, to_id))
+        );
+        let now = Utc::now();
+        let connection = self.inner.state.connection.lock();
+        connection.execute(
+            "insert into brain_relations (relation_id, relation_kind, from_entity_id, to_entity_id, metadata_json, confidence, archived, created_at, updated_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+             on conflict(relation_kind, from_entity_id, to_entity_id) do update set metadata_json = excluded.metadata_json, confidence = excluded.confidence, archived = excluded.archived, updated_at = excluded.updated_at",
+            params![
+                relation_id,
+                kind,
+                from_id,
+                to_id,
+                metadata_json,
+                confidence,
+                if archived { 1 } else { 0 },
+                now.to_rfc3339(),
+            ],
+        )?;
+        Ok(BrainRelationRecord {
+            id: relation_id,
+            kind: kind.to_owned(),
+            from_id: from_id.to_owned(),
+            to_id: to_id.to_owned(),
+            metadata_json: metadata_json.to_owned(),
+            confidence,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    fn upsert_task(&self, input: TaskUpsert) -> Result<BrainTaskRecord> {
+        let task_id = input.task_id.unwrap_or_else(|| {
+            format!(
+                "task:{}",
+                prompt_hash(&format!("{}:{}", input.summary, input.scope_json))
+            )
+        });
+        validate_task_status(&input.status)?;
+        let payload = BrainTaskPayload {
+            title: input.title.clone(),
+            summary: input.summary.clone(),
+            scope_json: input.scope_json.clone(),
+            links_json: input.links_json.clone(),
+            source_ref: input.source_ref.clone(),
+        };
+        let encrypted_blob_json = self.encrypt_payload(&payload)?;
+        let now = Utc::now();
+        let connection = self.inner.state.connection.lock();
+        connection.execute(
+            "insert into brain_tasks (task_id, status, priority, due_at, encrypted_blob_json, salience, confidence, fingerprint, archived, source_ref, created_at, updated_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10, ?10)
+             on conflict(task_id) do update set status = excluded.status, priority = excluded.priority, due_at = excluded.due_at, encrypted_blob_json = excluded.encrypted_blob_json, salience = excluded.salience, confidence = excluded.confidence, fingerprint = excluded.fingerprint, archived = 0, source_ref = excluded.source_ref, updated_at = excluded.updated_at",
+            params![
+                task_id,
+                input.status,
+                input.priority,
+                input.due_at.map(|value| value.to_rfc3339()),
+                encrypted_blob_json,
+                input.salience,
+                input.confidence,
+                fingerprint(&format!("{} {}", input.title, input.summary)),
+                input.source_ref,
+                now.to_rfc3339(),
+            ],
+        )?;
+        drop(connection);
+
+        let record = BrainTaskRecord {
+            id: task_id,
+            title: input.title,
+            summary: input.summary,
+            status: input.status,
+            priority: input.priority,
+            due_at: input.due_at,
+            scope_json: input.scope_json,
+            links_json: input.links_json,
+            salience: input.salience,
+            confidence: input.confidence,
+            archived: false,
+            created_at: now,
+            updated_at: now,
+        };
+        self.upsert_projection(
+            "brain-tasks",
+            &record.id,
+            &task_projection(&record),
+            &json!({ "status": record.status, "priority": record.priority }).to_string(),
+        )?;
+        self.upsert_projection(
+            "brain-suggestions",
+            &format!("suggestion:{}", record.id),
+            &format!("{} {}", record.summary, record.priority),
+            &json!({ "task_id": record.id, "status": record.status }).to_string(),
+        )?;
+        Ok(record)
+    }
+
+    fn upsert_or_merge_task(&self, input: TaskUpsert) -> Result<BrainTaskRecord> {
+        let target_id = input
+            .task_id
+            .or_else(|| {
+                self.find_similar_task(&input.summary, &input.scope_json)
+                    .map(|task| task.id)
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "task:{}",
+                    prompt_hash(&format!("{}:{}", input.summary, input.scope_json))
+                )
+            });
+        self.upsert_task(TaskUpsert {
+            task_id: Some(target_id),
+            ..input
+        })
+    }
+
+    fn link_record(
+        &self,
+        record_id: &str,
+        record_kind: &str,
+        links_json: &str,
+        source_ref: &str,
+    ) -> Result<()> {
+        for linked_id in parse_link_ids(links_json) {
+            let relation_kind = if record_kind == "task" {
+                "about"
+            } else {
+                "mentioned_with"
+            };
+            self.upsert_relation(
+                relation_kind,
+                record_id,
+                &linked_id,
+                &json!({ "source_ref": source_ref }).to_string(),
+                0.74,
+                false,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn list_entities(&self, include_archived: bool) -> Result<Vec<BrainEntityRecord>> {
+        let connection = self.inner.state.connection.lock();
+        let mut statement = connection.prepare(
+            "select entity_id, entity_kind, subtype, encrypted_blob_json, salience, confidence, archived, created_at, updated_at from brain_entities order by updated_at desc limit 512",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, f64>(4)?,
+                row.get::<_, f64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (
+                id,
+                kind,
+                subtype,
+                blob_json,
+                salience,
+                confidence,
+                archived,
+                created_at,
+                updated_at,
+            ) = row?;
+            if archived != 0 && !include_archived {
+                continue;
+            }
+            let payload = self.decrypt_payload::<BrainEntityPayload>(&blob_json)?;
+            records.push(BrainEntityRecord {
+                id,
+                kind,
+                subtype,
+                title: payload.title,
+                content: payload.content,
+                scope_json: payload.scope_json,
+                links_json: payload.links_json,
+                salience,
+                confidence,
+                archived: archived != 0,
+                created_at: parse_timestamp(&created_at)?,
+                updated_at: parse_timestamp(&updated_at)?,
+            });
+        }
+        Ok(records)
+    }
+
+    fn list_facts(&self, include_archived: bool) -> Result<Vec<BrainFactRecord>> {
+        let connection = self.inner.state.connection.lock();
+        let mut statement = connection.prepare(
+            "select fact_id, entity_id, encrypted_blob_json, salience, confidence, archived, created_at, updated_at from brain_facts order by updated_at desc limit 512",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (id, entity_id, blob_json, salience, confidence, archived, created_at, updated_at) =
+                row?;
+            if archived != 0 && !include_archived {
+                continue;
+            }
+            let payload = self.decrypt_payload::<BrainFactPayload>(&blob_json)?;
+            records.push(BrainFactRecord {
+                id,
+                entity_id,
+                content: payload.content,
+                scope_json: payload.scope_json,
+                salience,
+                confidence,
+                archived: archived != 0,
+                created_at: parse_timestamp(&created_at)?,
+                updated_at: parse_timestamp(&updated_at)?,
+            });
+        }
+        Ok(records)
+    }
+
+    fn list_relations(&self, include_archived: bool) -> Result<Vec<BrainRelationRecord>> {
+        let connection = self.inner.state.connection.lock();
+        let mut statement = connection.prepare(
+            "select relation_id, relation_kind, from_entity_id, to_entity_id, metadata_json, confidence, archived, created_at, updated_at from brain_relations order by updated_at desc limit 512",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, f64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (
+                id,
+                kind,
+                from_id,
+                to_id,
+                metadata_json,
+                confidence,
+                archived,
+                created_at,
+                updated_at,
+            ) = row?;
+            if archived != 0 && !include_archived {
+                continue;
+            }
+            records.push(BrainRelationRecord {
+                id,
+                kind,
+                from_id,
+                to_id,
+                metadata_json,
+                confidence,
+                created_at: parse_timestamp(&created_at)?,
+                updated_at: parse_timestamp(&updated_at)?,
+            });
+        }
+        Ok(records)
+    }
+
+    fn list_tasks(&self, include_archived: bool) -> Result<Vec<BrainTaskRecord>> {
+        let connection = self.inner.state.connection.lock();
+        let mut statement = connection.prepare(
+            "select task_id, status, priority, due_at, encrypted_blob_json, salience, confidence, archived, created_at, updated_at from brain_tasks order by updated_at desc limit 512",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, f64>(5)?,
+                row.get::<_, f64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+            ))
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (
+                id,
+                status,
+                priority,
+                due_at,
+                blob_json,
+                salience,
+                confidence,
+                archived,
+                created_at,
+                updated_at,
+            ) = row?;
+            if archived != 0 && !include_archived {
+                continue;
+            }
+            let payload = self.decrypt_payload::<BrainTaskPayload>(&blob_json)?;
+            records.push(BrainTaskRecord {
+                id,
+                title: payload.title,
+                summary: payload.summary,
+                status,
+                priority,
+                due_at: due_at.as_deref().map(parse_timestamp).transpose()?,
+                scope_json: payload.scope_json,
+                links_json: payload.links_json,
+                salience,
+                confidence,
+                archived: archived != 0,
+                created_at: parse_timestamp(&created_at)?,
+                updated_at: parse_timestamp(&updated_at)?,
+            });
+        }
+        Ok(records)
+    }
+
+    fn find_similar_task(&self, summary: &str, scope_json: &str) -> Option<BrainTaskRecord> {
+        let target = fingerprint(summary);
+        self.list_tasks(false)
+            .ok()?
+            .into_iter()
+            .filter(|task| scope_matches(&task.scope_json, scope_json))
+            .filter_map(|task| {
+                let score = similarity(&target, &fingerprint(&task.summary));
+                (score >= 0.72).then_some((task, score))
+            })
+            .max_by(|(_, left), (_, right)| left.partial_cmp(right).unwrap_or(Ordering::Equal))
+            .map(|(task, _)| task)
+    }
+
+    fn find_related_tool_task(&self, target: &str, summary: &str) -> Option<BrainTaskRecord> {
+        let target_lower = target.to_ascii_lowercase();
+        self.list_tasks(false).ok()?.into_iter().find(|task| {
+            matches!(task.status.as_str(), "open" | "in_progress" | "blocked")
+                && (task.summary.to_ascii_lowercase().contains(&target_lower)
+                    || task.title.to_ascii_lowercase().contains(&target_lower)
+                    || similarity(&fingerprint(summary), &fingerprint(&task.summary)) >= 0.72)
+        })
+    }
+
+    fn query_projection_hits(
+        &self,
+        namespace: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ProjectionHit>> {
+        self.inner
+            .state
+            .query_memory(
+                &MemoryQuery {
+                    namespace: namespace.to_owned(),
+                    query: query.to_owned(),
+                    limit: limit.max(1),
+                    filter_json: "{}".to_owned(),
+                },
+                &self.inner.encryption,
+            )
+            .map(|records| {
+                records
+                    .into_iter()
+                    .map(|record| ProjectionHit { key: record.key })
+                    .collect()
+            })
+    }
+
+    fn upsert_projection(
+        &self,
+        namespace: &str,
+        key: &str,
+        content: &str,
+        metadata_json: &str,
+    ) -> Result<()> {
+        self.inner
+            .state
+            .upsert_memory(
+                namespace,
+                key,
+                content,
+                metadata_json,
+                &self.inner.encryption,
+            )
+            .map(|_| ())
+    }
+
+    fn delete_projection(&self, namespace: &str, key: &str) -> Result<()> {
+        let connection = self.inner.state.connection.lock();
+        connection.execute(
+            "delete from vector_memory where namespace = ?1 and key = ?2",
+            params![namespace, key],
+        )?;
+        Ok(())
+    }
+
+    fn encrypt_payload<T: Serialize>(&self, payload: &T) -> Result<String> {
+        let encoded = serde_json::to_string(payload).context("failed to encode brain payload")?;
+        let encrypted = self
+            .inner
+            .encryption
+            .encrypt_text(&encoded)
+            .context("failed to encrypt brain payload")?;
+        serde_json::to_string(&encrypted).context("failed to encode encrypted brain payload")
+    }
+
+    fn decrypt_payload<T: for<'de> Deserialize<'de>>(&self, blob_json: &str) -> Result<T> {
+        let blob = serde_json::from_str::<EncryptedBlob>(blob_json)
+            .context("failed to decode encrypted brain payload")?;
+        let plaintext = self
+            .inner
+            .encryption
+            .decrypt_text(&blob)
+            .context("failed to decrypt brain payload")?;
+        serde_json::from_str(&plaintext).context("failed to decode brain payload")
+    }
+}
+
+fn validate_entity_kind(kind: &str) -> Result<()> {
+    if matches!(kind, "person" | "environment" | "artifact" | "task") {
+        Ok(())
+    } else {
+        bail!("unsupported brain entity kind {}", kind)
+    }
+}
+
+fn validate_environment_subtype(subtype: &str) -> Result<()> {
+    if matches!(
+        subtype,
+        "runtime" | "workspace" | "deployment" | "project" | "team" | "place"
+    ) {
+        Ok(())
+    } else {
+        bail!("unsupported brain environment subtype {}", subtype)
+    }
+}
+
+fn validate_task_status(status: &str) -> Result<()> {
+    if matches!(
+        status,
+        "open" | "in_progress" | "blocked" | "done" | "cancelled"
+    ) {
+        Ok(())
+    } else {
+        bail!("unsupported brain task status {}", status)
+    }
+}
+
+fn validate_relation_kind(kind: &str) -> Result<()> {
+    if matches!(
+        kind,
+        "knows"
+            | "owns"
+            | "belongs_to"
+            | "runs_in"
+            | "about"
+            | "assigned_to"
+            | "depends_on"
+            | "blocked_by"
+            | "mentioned_with"
+    ) {
+        Ok(())
+    } else {
+        bail!("unsupported brain relation kind {}", kind)
+    }
+}
+
+fn normalize_forget_target_kind(kind: &str) -> String {
+    match kind {
+        "person" | "environment" | "artifact" => "entity".to_owned(),
+        "" => "entity".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+fn default_source_ref(source_ref: &str, seed: &str, prefix: &str) -> String {
+    if source_ref.is_empty() {
+        format!("{}:{}", prefix, prompt_hash(seed))
+    } else {
+        source_ref.to_owned()
+    }
+}
+
+fn preferred_title(primary: &str, fallback: &str) -> String {
+    truncate_with_ellipsis(&non_empty_or_default(primary, fallback), 80)
+}
+
+fn non_empty_or_default(value: &str, fallback: &str) -> String {
+    if value.trim().is_empty() {
+        fallback.trim().to_owned()
+    } else {
+        value.trim().to_owned()
+    }
+}
+
+fn entity_projection(record: &BrainEntityRecord) -> String {
+    format!(
+        "{} {} {} {} {}",
+        record.kind, record.subtype, record.title, record.content, record.scope_json
+    )
+}
+
+fn fact_projection(record: &BrainFactRecord) -> String {
+    format!("{} {}", record.content, record.scope_json)
+}
+
+fn task_projection(record: &BrainTaskRecord) -> String {
+    format!(
+        "{} {} {} {} {:?}",
+        record.title, record.summary, record.status, record.priority, record.due_at
+    )
+}
+
+fn build_recall_summary(
+    entities: &[BrainEntityRecord],
+    facts: &[BrainFactRecord],
+    tasks: &[BrainTaskRecord],
+) -> String {
+    let mut parts = Vec::new();
+    if !entities.is_empty() {
+        parts.push(format!("{} entities", entities.len()));
+    }
+    if !facts.is_empty() {
+        parts.push(format!("{} facts", facts.len()));
+    }
+    if !tasks.is_empty() {
+        parts.push(format!("{} tasks", tasks.len()));
+    }
+    if parts.is_empty() {
+        "no relevant brain context found".to_owned()
+    } else {
+        format!("matched {}", parts.join(", "))
+    }
+}
+
+fn scope_matches(record_scope_json: &str, query_scope_json: &str) -> bool {
+    if query_scope_json.trim().is_empty() || query_scope_json.trim() == "{}" {
+        return true;
+    }
+    let query = serde_json::from_str::<Value>(query_scope_json).unwrap_or(Value::Null);
+    let record = serde_json::from_str::<Value>(record_scope_json).unwrap_or(Value::Null);
+    let (Some(query_object), Some(record_object)) = (query.as_object(), record.as_object()) else {
+        return false;
+    };
+    query_object
+        .iter()
+        .all(|(key, value)| record_object.get(key) == Some(value))
+}
+
+fn parse_link_ids(links_json: &str) -> Vec<String> {
+    let parsed = serde_json::from_str::<Value>(links_json).unwrap_or(Value::Null);
+    match parsed {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| match item {
+                Value::String(value) => Some(value),
+                Value::Object(object) => {
+                    object.get("id").and_then(Value::as_str).map(str::to_owned)
+                }
+                _ => None,
+            })
+            .collect(),
+        Value::Object(object) => object
+            .values()
+            .flat_map(|value| match value {
+                Value::Array(items) => items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+                Value::String(value) => vec![value.to_owned()],
+                _ => Vec::new(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn extract_artifacts(content: &str) -> Vec<String> {
+    let mut artifacts = content
+        .split_whitespace()
+        .map(|token| token.trim_matches(|character: char| ",.;:()[]{}<>\"'".contains(character)))
+        .filter(|token| {
+            token.starts_with("http://")
+                || token.starts_with("https://")
+                || token.contains('/')
+                || [
+                    ".rs", ".md", ".json", ".yaml", ".yml", ".toml", ".go", ".ts", ".js", ".proto",
+                ]
+                .iter()
+                .any(|suffix| token.ends_with(suffix))
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    artifacts.sort();
+    artifacts.dedup();
+    artifacts
+}
+
+fn extract_environment_mentions(content: &str) -> Vec<(String, String)> {
+    let lower = content.to_ascii_lowercase();
+    let mut matches = Vec::new();
+    for (needle, subtype, title) in [
+        (" production ", "deployment", "production"),
+        (" prod ", "deployment", "prod"),
+        (" staging ", "deployment", "staging"),
+        (" stage ", "deployment", "stage"),
+        (" development ", "deployment", "development"),
+        (" dev ", "deployment", "dev"),
+        (" remote ", "place", "remote"),
+        (" office ", "place", "office"),
+        (" home ", "place", "home"),
+    ] {
+        if lower.contains(needle) {
+            matches.push((subtype.to_owned(), title.to_owned()));
+        }
+    }
+    for prefix in ["project ", "team "] {
+        if let Some(index) = lower.find(prefix) {
+            let remainder = content[index + prefix.len()..]
+                .split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !remainder.is_empty() {
+                matches.push((
+                    if prefix.trim() == "project" {
+                        "project".to_owned()
+                    } else {
+                        "team".to_owned()
+                    },
+                    remainder,
+                ));
+            }
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    matches
+}
+
+fn extract_task_summary(content: &str) -> Option<String> {
+    for marker in [
+        "remind me to ",
+        "remember to ",
+        "need to ",
+        "needs to ",
+        "please ",
+        "todo: ",
+        "todo ",
+        "must ",
+    ] {
+        if let Some(value) = extract_after_case_insensitive(content, marker) {
+            return Some(truncate_with_ellipsis(&value, 180));
+        }
+    }
+
+    let trimmed = content.trim();
+    if !trimmed.ends_with('?')
+        && ["implement", "create", "fix", "update", "build", "memorize"]
+            .iter()
+            .any(|verb| trimmed.to_ascii_lowercase().contains(verb))
+    {
+        return Some(truncate_with_ellipsis(trimmed, 180));
+    }
+    None
+}
+
+fn extract_assistant_commitment(content: &str) -> Option<String> {
+    for marker in ["i will ", "i'll ", "next step is to ", "i can "] {
+        if let Some(value) = extract_after_case_insensitive(content, marker) {
+            return Some(truncate_with_ellipsis(&value, 180));
+        }
+    }
+    None
+}
+
+fn extract_after_case_insensitive(content: &str, marker: &str) -> Option<String> {
+    let lower = content.to_ascii_lowercase();
+    let marker_lower = marker.to_ascii_lowercase();
+    let index = lower.find(&marker_lower)?;
+    let value = content[index + marker.len()..]
+        .trim()
+        .trim_matches(|character: char| character == '.' || character == ':')
+        .to_owned();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn parse_due_at(content: &str) -> Option<DateTime<Utc>> {
+    let lower = content.to_ascii_lowercase();
+    if lower.contains("tomorrow") {
+        Some(Utc::now() + Duration::days(1))
+    } else if lower.contains("today") {
+        Some(Utc::now() + Duration::hours(12))
+    } else if lower.contains("next week") {
+        Some(Utc::now() + Duration::days(7))
+    } else {
+        None
+    }
+}
+
+fn task_priority_from_text(content: &str) -> String {
+    let lower = content.to_ascii_lowercase();
+    if lower.contains("urgent") || lower.contains("asap") {
+        "urgent".to_owned()
+    } else if lower.contains("high priority") || lower.contains("important") {
+        "high".to_owned()
+    } else if lower.contains("low priority") {
+        "low".to_owned()
+    } else {
+        "normal".to_owned()
+    }
+}
+
+fn priority_weight(priority: &str) -> f64 {
+    match priority {
+        "urgent" => 1.0,
+        "high" => 0.8,
+        "low" => 0.25,
+        _ => 0.5,
+    }
+}
+
+fn suggestion_reason(
+    task: &BrainTaskRecord,
+    stale: bool,
+    due_bonus: f64,
+    blocked_bonus: f64,
+) -> String {
+    if blocked_bonus > 0.0 {
+        "task is blocked and needs attention".to_owned()
+    } else if due_bonus >= 0.35 {
+        "task is overdue".to_owned()
+    } else if due_bonus > 0.0 {
+        "task is due soon".to_owned()
+    } else if stale {
+        "task has gone stale".to_owned()
+    } else {
+        format!("{} priority task", task.priority)
+    }
+}
+
+fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_owned();
+    }
+    value
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>()
+        + "..."
+}
+
+fn parse_timestamp(value: &str) -> Result<DateTime<Utc>> {
+    Ok(DateTime::parse_from_rfc3339(value)
+        .with_context(|| format!("invalid timestamp {}", value))?
+        .with_timezone(&Utc))
+}
+
 struct OrchestrationResult {
     provider: String,
     response: String,
@@ -1260,6 +3674,7 @@ struct QueueManager {
 struct QueueInner {
     state: StateStore,
     tools: ToolExecutor,
+    brain: BrainManager,
     pending: Mutex<QueueBuckets>,
     notify: Notify,
     inflight: Arc<Semaphore>,
@@ -1276,16 +3691,12 @@ struct QueueBuckets {
 }
 
 impl QueueManager {
-    fn new(
-        config: AppConfig,
-        state: StateStore,
-        tools: ToolExecutor,
-        _encryption: EncryptionManager,
-    ) -> Self {
+    fn new(config: AppConfig, state: StateStore, tools: ToolExecutor, brain: BrainManager) -> Self {
         let max_pending = config.orchestration.max_inflight.max(1) * 8;
         let inner = Arc::new(QueueInner {
             state,
             tools,
+            brain,
             pending: Mutex::new(QueueBuckets::default()),
             notify: Notify::new(),
             inflight: Arc::new(Semaphore::new(config.orchestration.max_inflight.max(1))),
@@ -1348,6 +3759,17 @@ async fn run_queue_worker(inner: Arc<QueueInner>) {
                         priority: task.priority.clone(),
                     })
                     .await;
+                if outcome.success {
+                    let _ = worker.brain.ingest_tool_result(
+                        &ToolCall {
+                            target: task.target.clone(),
+                            arguments_json: task.arguments_json.clone(),
+                            allow_network: false,
+                            priority: task.priority.clone(),
+                        },
+                        &outcome,
+                    );
+                }
                 let status = if outcome.success {
                     "completed"
                 } else {
@@ -1697,8 +4119,45 @@ pub fn runtime_endpoint_hint(paths: &OpenPinchPaths) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EncryptionManager, QueueBuckets, fingerprint, similarity};
-    use openpinch_common::{AppConfig, OpenPinchPaths};
+    use super::{
+        BrainForget, BrainManager, BrainRemember, BrainSuggestQuery, EncryptionManager,
+        QueueBuckets, StateStore, ToolCall, ToolOutcome, fingerprint, similarity,
+    };
+    use openpinch_common::{AppConfig, MessageEnvelope, OpenPinchPaths, QueuePriority};
+    use std::fs;
+    use uuid::Uuid;
+
+    fn test_paths() -> OpenPinchPaths {
+        let root = std::env::temp_dir().join(format!("openpinch-brain-test-{}", Uuid::new_v4()));
+        let paths = OpenPinchPaths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            state_dir: root.join("state"),
+            config_file: root.join("config").join("config.toml"),
+            runtime_dir: root.join("state").join("runtime"),
+            log_dir: root.join("state").join("logs"),
+            log_file: root.join("state").join("logs").join("openpinch.log"),
+            database_file: root.join("data").join("openpinch.sqlite"),
+            skills_dir: root.join("data").join("skills"),
+            installs_dir: root.join("data").join("skills").join("installed"),
+            runtime_socket: root.join("state").join("runtime").join("engine.sock"),
+            runtime_state_file: root
+                .join("state")
+                .join("runtime")
+                .join("runtime-state.json"),
+        };
+        paths.ensure_all().expect("create test paths");
+        fs::write(&paths.config_file, "").expect("write config placeholder");
+        paths
+    }
+
+    fn test_brain() -> BrainManager {
+        let paths = test_paths();
+        let config = AppConfig::default();
+        let state = StateStore::open(&paths.database_file).expect("open state");
+        let encryption = EncryptionManager::load_or_init(&config, &paths).expect("encryption");
+        BrainManager::new(&config, &paths, state, encryption).expect("brain manager")
+    }
 
     #[test]
     fn fingerprint_similarity_prefers_shared_tokens() {
@@ -1735,5 +4194,133 @@ mod tests {
         let config = AppConfig::default();
         let manager = EncryptionManager::load_or_init(&config, &paths).expect("manager");
         assert_eq!(manager.state(), "encrypted");
+    }
+
+    #[test]
+    fn brain_remember_recall_and_forget_round_trip() {
+        let brain = test_brain();
+        let remembered = brain
+            .remember(BrainRemember {
+                kind: "person".to_owned(),
+                subtype: "contact".to_owned(),
+                title: "Alice".to_owned(),
+                content: "Alice prefers status updates about deployments".to_owned(),
+                importance: 0.9,
+                scope_json: "{\"connector\":\"telegram\"}".to_owned(),
+                links_json: "[]".to_owned(),
+                source_ref: "remember:alice".to_owned(),
+            })
+            .expect("remember entity");
+        assert!(remembered.entity.is_some());
+
+        let task = brain
+            .remember(BrainRemember {
+                kind: "task".to_owned(),
+                subtype: String::new(),
+                title: "Deployment follow-up".to_owned(),
+                content: "Need to update Alice after the deployment".to_owned(),
+                importance: 0.95,
+                scope_json: "{\"connector\":\"telegram\"}".to_owned(),
+                links_json: serde_json::to_string(&vec![remembered.entity.unwrap().id])
+                    .expect("encode links"),
+                source_ref: "remember:task".to_owned(),
+            })
+            .expect("remember task");
+        assert!(task.task.is_some());
+
+        let recall = brain
+            .recall(openpinch_common::BrainRecallQuery {
+                query: "deployment Alice".to_owned(),
+                scope_json: "{\"connector\":\"telegram\"}".to_owned(),
+                limit: 5,
+                include_archived: false,
+            })
+            .expect("recall");
+        assert!(!recall.entities.is_empty());
+        assert!(!recall.tasks.is_empty());
+
+        let forgotten = brain
+            .forget(BrainForget {
+                target_kind: "task".to_owned(),
+                target_id: task.task.expect("task record").id,
+                mode: "archive".to_owned(),
+                reason: "completed".to_owned(),
+            })
+            .expect("forget");
+        assert!(forgotten.forgotten);
+    }
+
+    #[test]
+    fn brain_message_ingest_is_idempotent_for_same_contact_and_task() {
+        let brain = test_brain();
+        let message = MessageEnvelope {
+            connector: "telegram".to_owned(),
+            channel_id: "chan-1".to_owned(),
+            sender: "peshala".to_owned(),
+            body: "Please create the OpenPinch brain task tracker".to_owned(),
+            metadata_json: "{}".to_owned(),
+        };
+
+        brain.ingest_message(&message).expect("ingest once");
+        brain.ingest_message(&message).expect("ingest twice");
+
+        let tasks = brain.list_tasks(false).expect("list tasks");
+        let matching = tasks
+            .iter()
+            .filter(|task| task.summary.contains("OpenPinch brain task tracker"))
+            .count();
+        assert_eq!(matching, 1);
+
+        let entities = brain.list_entities(false).expect("list entities");
+        assert!(entities.iter().any(|entity| entity.subtype == "owner"));
+        assert!(entities.iter().any(|entity| entity.title == "peshala"));
+    }
+
+    #[test]
+    fn brain_suggestions_prioritize_open_tasks_and_tool_results_close_matching_work() {
+        let brain = test_brain();
+        let message = MessageEnvelope {
+            connector: "telegram".to_owned(),
+            channel_id: "chan-2".to_owned(),
+            sender: "ops".to_owned(),
+            body: "Need to run builtin.echo for the incident today".to_owned(),
+            metadata_json: "{}".to_owned(),
+        };
+        brain.ingest_message(&message).expect("ingest task");
+
+        let suggestions = brain
+            .suggest(BrainSuggestQuery {
+                scope_json:
+                    "{\"connector\":\"telegram\",\"channel_id\":\"chan-2\",\"sender\":\"ops\"}"
+                        .to_owned(),
+                limit: 3,
+            })
+            .expect("suggest");
+        assert!(!suggestions.suggestions.is_empty());
+
+        brain
+            .ingest_tool_result(
+                &ToolCall {
+                    target: "builtin.echo".to_owned(),
+                    arguments_json: "{}".to_owned(),
+                    allow_network: false,
+                    priority: QueuePriority::Interactive,
+                },
+                &ToolOutcome {
+                    success: true,
+                    summary: "builtin.echo completed".to_owned(),
+                    data_json: "{}".to_owned(),
+                    error: String::new(),
+                    logs: vec![],
+                },
+            )
+            .expect("ingest tool result");
+
+        let tasks = brain.list_tasks(false).expect("list tasks");
+        assert!(
+            tasks
+                .iter()
+                .any(|task| { task.summary.contains("builtin.echo") && task.status == "done" })
+        );
     }
 }

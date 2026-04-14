@@ -14,3 +14,4 @@ gateway/.cache/
 .idea/
 .vscode/
 .env
+.codex

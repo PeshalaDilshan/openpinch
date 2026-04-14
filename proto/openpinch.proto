@@ -18,6 +18,12 @@ service GatewayService {
   rpc ExportAudit(AuditExportRequest) returns (AuditExportResponse);
   rpc QueryMemory(MemoryQueryRequest) returns (MemoryQueryResponse);
   rpc UpsertMemory(MemoryUpsertRequest) returns (MemoryUpsertResponse);
+  rpc RememberBrain(BrainRememberRequest) returns (BrainRememberResponse);
+  rpc RecallBrain(BrainRecallRequest) returns (BrainRecallResponse);
+  rpc SuggestBrain(BrainSuggestRequest) returns (BrainSuggestResponse);
+  rpc ListBrainTasks(BrainTaskListRequest) returns (BrainTaskListResponse);
+  rpc UpdateBrainTask(BrainTaskUpdateRequest) returns (BrainTaskUpdateResponse);
+  rpc ForgetBrain(BrainForgetRequest) returns (BrainForgetResponse);
   rpc RunAgentProtocol(AgentProtocolRequest) returns (AgentProtocolResponse);
   rpc QueueTask(QueueTaskRequest) returns (QueueTaskResponse);
   rpc GetPolicyReport(PolicyReportRequest) returns (PolicyReportResponse);
@@ -30,6 +36,12 @@ service EngineRuntimeService {
   rpc Health(Empty) returns (HealthResponse);
   rpc QueryMemory(MemoryQueryRequest) returns (MemoryQueryResponse);
   rpc UpsertMemory(MemoryUpsertRequest) returns (MemoryUpsertResponse);
+  rpc RememberBrain(BrainRememberRequest) returns (BrainRememberResponse);
+  rpc RecallBrain(BrainRecallRequest) returns (BrainRecallResponse);
+  rpc SuggestBrain(BrainSuggestRequest) returns (BrainSuggestResponse);
+  rpc ListBrainTasks(BrainTaskListRequest) returns (BrainTaskListResponse);
+  rpc UpdateBrainTask(BrainTaskUpdateRequest) returns (BrainTaskUpdateResponse);
+  rpc ForgetBrain(BrainForgetRequest) returns (BrainForgetResponse);
   rpc RunAgentProtocol(AgentProtocolRequest) returns (AgentProtocolResponse);
   rpc AttestSession(AttestationRequest) returns (AttestationResponse);
   rpc ExportAudit(AuditExportRequest) returns (AuditExportResponse);
@@ -250,6 +262,153 @@ message MemoryUpsertResponse {
   bool stored = 1;
   string backend = 2;
   string digest = 3;
+}
+
+message BrainRememberRequest {
+  string kind = 1;
+  string subtype = 2;
+  string title = 3;
+  string content = 4;
+  double importance = 5;
+  string scope_json = 6;
+  string links_json = 7;
+  string source_ref = 8;
+}
+
+message BrainEntity {
+  string id = 1;
+  string kind = 2;
+  string subtype = 3;
+  string title = 4;
+  string content = 5;
+  string scope_json = 6;
+  string links_json = 7;
+  double salience = 8;
+  double confidence = 9;
+  bool archived = 10;
+  string created_at = 11;
+  string updated_at = 12;
+}
+
+message BrainFact {
+  string id = 1;
+  string entity_id = 2;
+  string content = 3;
+  string scope_json = 4;
+  double salience = 5;
+  double confidence = 6;
+  bool archived = 7;
+  string created_at = 8;
+  string updated_at = 9;
+}
+
+message BrainRelation {
+  string id = 1;
+  string kind = 2;
+  string from_id = 3;
+  string to_id = 4;
+  string metadata_json = 5;
+  double confidence = 6;
+  string created_at = 7;
+  string updated_at = 8;
+}
+
+message BrainTask {
+  string id = 1;
+  string title = 2;
+  string summary = 3;
+  string status = 4;
+  string priority = 5;
+  string due_at = 6;
+  string scope_json = 7;
+  string links_json = 8;
+  double salience = 9;
+  double confidence = 10;
+  bool archived = 11;
+  string created_at = 12;
+  string updated_at = 13;
+}
+
+message BrainRememberResponse {
+  bool stored = 1;
+  BrainEntity entity = 2;
+  BrainTask task = 3;
+  string digest = 4;
+}
+
+message BrainRecallRequest {
+  string query = 1;
+  string scope_json = 2;
+  uint32 limit = 3;
+  bool include_archived = 4;
+}
+
+message BrainRecallResponse {
+  string summary = 1;
+  repeated BrainEntity entities = 2;
+  repeated BrainFact facts = 3;
+  repeated BrainRelation relations = 4;
+  repeated BrainTask tasks = 5;
+}
+
+message BrainSuggestRequest {
+  string scope_json = 1;
+  uint32 limit = 2;
+}
+
+message BrainSuggestion {
+  string id = 1;
+  string task_id = 2;
+  string summary = 3;
+  string reason = 4;
+  double score = 5;
+  string context_json = 6;
+}
+
+message BrainSuggestResponse {
+  string summary = 1;
+  repeated BrainSuggestion suggestions = 2;
+}
+
+message BrainTaskListRequest {
+  string scope_json = 1;
+  repeated string statuses = 2;
+  repeated string priorities = 3;
+  string due_before = 4;
+  uint32 limit = 5;
+}
+
+message BrainTaskListResponse {
+  string summary = 1;
+  repeated BrainTask tasks = 2;
+}
+
+message BrainTaskUpdateRequest {
+  string task_id = 1;
+  string status = 2;
+  string priority = 3;
+  string due_at = 4;
+  string summary = 5;
+  string links_json = 6;
+  string source_ref = 7;
+}
+
+message BrainTaskUpdateResponse {
+  bool updated = 1;
+  BrainTask task = 2;
+}
+
+message BrainForgetRequest {
+  string target_kind = 1;
+  string target_id = 2;
+  string mode = 3;
+  string reason = 4;
+}
+
+message BrainForgetResponse {
+  bool forgotten = 1;
+  string mode = 2;
+  string target_id = 3;
 }
 
 message AgentMessage {

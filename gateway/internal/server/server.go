@@ -43,6 +43,12 @@ type GatewayServiceServer interface {
 	ExportAudit(context.Context, proto.Message) (proto.Message, error)
 	QueryMemory(context.Context, proto.Message) (proto.Message, error)
 	UpsertMemory(context.Context, proto.Message) (proto.Message, error)
+	RememberBrain(context.Context, proto.Message) (proto.Message, error)
+	RecallBrain(context.Context, proto.Message) (proto.Message, error)
+	SuggestBrain(context.Context, proto.Message) (proto.Message, error)
+	ListBrainTasks(context.Context, proto.Message) (proto.Message, error)
+	UpdateBrainTask(context.Context, proto.Message) (proto.Message, error)
+	ForgetBrain(context.Context, proto.Message) (proto.Message, error)
 	RunAgentProtocol(context.Context, proto.Message) (proto.Message, error)
 	QueueTask(context.Context, proto.Message) (proto.Message, error)
 	GetPolicyReport(context.Context, proto.Message) (proto.Message, error)
@@ -81,6 +87,12 @@ func (s *Service) Register(server *grpc.Server) error {
 			{MethodName: "ExportAudit", Handler: unaryHandler("openpinch.v1.AuditExportRequest", s.ExportAudit)},
 			{MethodName: "QueryMemory", Handler: unaryHandler("openpinch.v1.MemoryQueryRequest", s.QueryMemory)},
 			{MethodName: "UpsertMemory", Handler: unaryHandler("openpinch.v1.MemoryUpsertRequest", s.UpsertMemory)},
+			{MethodName: "RememberBrain", Handler: unaryHandler("openpinch.v1.BrainRememberRequest", s.RememberBrain)},
+			{MethodName: "RecallBrain", Handler: unaryHandler("openpinch.v1.BrainRecallRequest", s.RecallBrain)},
+			{MethodName: "SuggestBrain", Handler: unaryHandler("openpinch.v1.BrainSuggestRequest", s.SuggestBrain)},
+			{MethodName: "ListBrainTasks", Handler: unaryHandler("openpinch.v1.BrainTaskListRequest", s.ListBrainTasks)},
+			{MethodName: "UpdateBrainTask", Handler: unaryHandler("openpinch.v1.BrainTaskUpdateRequest", s.UpdateBrainTask)},
+			{MethodName: "ForgetBrain", Handler: unaryHandler("openpinch.v1.BrainForgetRequest", s.ForgetBrain)},
 			{MethodName: "RunAgentProtocol", Handler: unaryHandler("openpinch.v1.AgentProtocolRequest", s.RunAgentProtocol)},
 			{MethodName: "QueueTask", Handler: unaryHandler("openpinch.v1.QueueTaskRequest", s.QueueTask)},
 			{MethodName: "GetPolicyReport", Handler: unaryHandler("openpinch.v1.PolicyReportRequest", s.GetPolicyReport)},
@@ -334,6 +346,141 @@ func (s *Service) UpsertMemory(ctx context.Context, request proto.Message) (prot
 	return response, nil
 }
 
+func (s *Service) RememberBrain(ctx context.Context, request proto.Message) (proto.Message, error) {
+	reflection := request.ProtoReflect()
+	importanceField := pb.FieldByName(reflection, "importance")
+	result, err := s.bridge.RememberBrain(
+		ctx,
+		pb.GetString(reflection, "kind"),
+		pb.GetString(reflection, "subtype"),
+		pb.GetString(reflection, "title"),
+		pb.GetString(reflection, "content"),
+		float64(reflection.Get(importanceField).Float()),
+		pb.GetString(reflection, "scope_json"),
+		pb.GetString(reflection, "links_json"),
+		pb.GetString(reflection, "source_ref"),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "remember brain: %v", err)
+	}
+	response := s.schema.NewMessage("openpinch.v1.BrainRememberResponse")
+	responseRef := response.ProtoReflect()
+	pb.SetBool(responseRef, "stored", result.Stored)
+	pb.SetString(responseRef, "digest", result.Digest)
+	if result.Entity != nil {
+		pb.SetMessage(responseRef, "entity", protoBrainEntityMessage(s.schema, *result.Entity))
+	}
+	if result.Task != nil {
+		pb.SetMessage(responseRef, "task", protoBrainTaskMessage(s.schema, *result.Task))
+	}
+	return response, nil
+}
+
+func (s *Service) RecallBrain(ctx context.Context, request proto.Message) (proto.Message, error) {
+	reflection := request.ProtoReflect()
+	result, err := s.bridge.RecallBrain(
+		ctx,
+		pb.GetString(reflection, "query"),
+		pb.GetString(reflection, "scope_json"),
+		pb.GetUint32(reflection, "limit"),
+		pb.GetBool(reflection, "include_archived"),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "recall brain: %v", err)
+	}
+	response := s.schema.NewMessage("openpinch.v1.BrainRecallResponse")
+	responseRef := response.ProtoReflect()
+	pb.SetString(responseRef, "summary", result.Summary)
+	appendBrainEntities(s.schema, responseRef, "entities", result.Entities)
+	appendBrainFacts(s.schema, responseRef, "facts", result.Facts)
+	appendBrainRelations(s.schema, responseRef, "relations", result.Relations)
+	appendBrainTasks(s.schema, responseRef, "tasks", result.Tasks)
+	return response, nil
+}
+
+func (s *Service) SuggestBrain(ctx context.Context, request proto.Message) (proto.Message, error) {
+	reflection := request.ProtoReflect()
+	result, err := s.bridge.SuggestBrain(
+		ctx,
+		pb.GetString(reflection, "scope_json"),
+		pb.GetUint32(reflection, "limit"),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "suggest brain: %v", err)
+	}
+	response := s.schema.NewMessage("openpinch.v1.BrainSuggestResponse")
+	responseRef := response.ProtoReflect()
+	pb.SetString(responseRef, "summary", result.Summary)
+	field := pb.FieldByName(responseRef, "suggestions")
+	list := responseRef.Mutable(field).List()
+	for _, suggestion := range result.Suggestions {
+		list.Append(protoreflect.ValueOfMessage(protoBrainSuggestionMessage(s.schema, suggestion).ProtoReflect()))
+	}
+	return response, nil
+}
+
+func (s *Service) ListBrainTasks(ctx context.Context, request proto.Message) (proto.Message, error) {
+	reflection := request.ProtoReflect()
+	result, err := s.bridge.ListBrainTasks(
+		ctx,
+		pb.GetString(reflection, "scope_json"),
+		repeatedStrings(reflection, "statuses"),
+		repeatedStrings(reflection, "priorities"),
+		pb.GetString(reflection, "due_before"),
+		pb.GetUint32(reflection, "limit"),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list brain tasks: %v", err)
+	}
+	response := s.schema.NewMessage("openpinch.v1.BrainTaskListResponse")
+	responseRef := response.ProtoReflect()
+	pb.SetString(responseRef, "summary", result.Summary)
+	appendBrainTasks(s.schema, responseRef, "tasks", result.Tasks)
+	return response, nil
+}
+
+func (s *Service) UpdateBrainTask(ctx context.Context, request proto.Message) (proto.Message, error) {
+	reflection := request.ProtoReflect()
+	task, err := s.bridge.UpdateBrainTask(
+		ctx,
+		pb.GetString(reflection, "task_id"),
+		pb.GetString(reflection, "status"),
+		pb.GetString(reflection, "priority"),
+		pb.GetString(reflection, "due_at"),
+		pb.GetString(reflection, "summary"),
+		pb.GetString(reflection, "links_json"),
+		pb.GetString(reflection, "source_ref"),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "update brain task: %v", err)
+	}
+	response := s.schema.NewMessage("openpinch.v1.BrainTaskUpdateResponse")
+	responseRef := response.ProtoReflect()
+	pb.SetBool(responseRef, "updated", true)
+	pb.SetMessage(responseRef, "task", protoBrainTaskMessage(s.schema, *task))
+	return response, nil
+}
+
+func (s *Service) ForgetBrain(ctx context.Context, request proto.Message) (proto.Message, error) {
+	reflection := request.ProtoReflect()
+	result, err := s.bridge.ForgetBrain(
+		ctx,
+		pb.GetString(reflection, "target_kind"),
+		pb.GetString(reflection, "target_id"),
+		pb.GetString(reflection, "mode"),
+		pb.GetString(reflection, "reason"),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "forget brain: %v", err)
+	}
+	response := s.schema.NewMessage("openpinch.v1.BrainForgetResponse")
+	responseRef := response.ProtoReflect()
+	pb.SetBool(responseRef, "forgotten", result.Forgotten)
+	pb.SetString(responseRef, "mode", result.Mode)
+	pb.SetString(responseRef, "target_id", result.TargetID)
+	return response, nil
+}
+
 func (s *Service) RunAgentProtocol(ctx context.Context, request proto.Message) (proto.Message, error) {
 	reflection := request.ProtoReflect()
 	field := pb.FieldByName(reflection, "messages")
@@ -537,6 +684,126 @@ func protoMemoryRecordMessage(schema *pb.Schema, record enginebridge.MemoryRecor
 	reflection.Set(field, protoreflect.ValueOfFloat64(record.Score))
 	pb.SetString(reflection, "created_at", record.CreatedAt)
 	return message
+}
+
+func protoBrainEntityMessage(schema *pb.Schema, record enginebridge.BrainEntity) proto.Message {
+	message := schema.NewMessage("openpinch.v1.BrainEntity")
+	reflection := message.ProtoReflect()
+	pb.SetString(reflection, "id", record.ID)
+	pb.SetString(reflection, "kind", record.Kind)
+	pb.SetString(reflection, "subtype", record.Subtype)
+	pb.SetString(reflection, "title", record.Title)
+	pb.SetString(reflection, "content", record.Content)
+	pb.SetString(reflection, "scope_json", record.ScopeJSON)
+	pb.SetString(reflection, "links_json", record.LinksJSON)
+	reflection.Set(pb.FieldByName(reflection, "salience"), protoreflect.ValueOfFloat64(record.Salience))
+	reflection.Set(pb.FieldByName(reflection, "confidence"), protoreflect.ValueOfFloat64(record.Confidence))
+	pb.SetBool(reflection, "archived", record.Archived)
+	pb.SetString(reflection, "created_at", record.CreatedAt)
+	pb.SetString(reflection, "updated_at", record.UpdatedAt)
+	return message
+}
+
+func protoBrainFactMessage(schema *pb.Schema, record enginebridge.BrainFact) proto.Message {
+	message := schema.NewMessage("openpinch.v1.BrainFact")
+	reflection := message.ProtoReflect()
+	pb.SetString(reflection, "id", record.ID)
+	pb.SetString(reflection, "entity_id", record.EntityID)
+	pb.SetString(reflection, "content", record.Content)
+	pb.SetString(reflection, "scope_json", record.ScopeJSON)
+	reflection.Set(pb.FieldByName(reflection, "salience"), protoreflect.ValueOfFloat64(record.Salience))
+	reflection.Set(pb.FieldByName(reflection, "confidence"), protoreflect.ValueOfFloat64(record.Confidence))
+	pb.SetBool(reflection, "archived", record.Archived)
+	pb.SetString(reflection, "created_at", record.CreatedAt)
+	pb.SetString(reflection, "updated_at", record.UpdatedAt)
+	return message
+}
+
+func protoBrainRelationMessage(schema *pb.Schema, record enginebridge.BrainRelation) proto.Message {
+	message := schema.NewMessage("openpinch.v1.BrainRelation")
+	reflection := message.ProtoReflect()
+	pb.SetString(reflection, "id", record.ID)
+	pb.SetString(reflection, "kind", record.Kind)
+	pb.SetString(reflection, "from_id", record.FromID)
+	pb.SetString(reflection, "to_id", record.ToID)
+	pb.SetString(reflection, "metadata_json", record.MetadataJSON)
+	reflection.Set(pb.FieldByName(reflection, "confidence"), protoreflect.ValueOfFloat64(record.Confidence))
+	pb.SetString(reflection, "created_at", record.CreatedAt)
+	pb.SetString(reflection, "updated_at", record.UpdatedAt)
+	return message
+}
+
+func protoBrainTaskMessage(schema *pb.Schema, record enginebridge.BrainTask) proto.Message {
+	message := schema.NewMessage("openpinch.v1.BrainTask")
+	reflection := message.ProtoReflect()
+	pb.SetString(reflection, "id", record.ID)
+	pb.SetString(reflection, "title", record.Title)
+	pb.SetString(reflection, "summary", record.Summary)
+	pb.SetString(reflection, "status", record.Status)
+	pb.SetString(reflection, "priority", record.Priority)
+	pb.SetString(reflection, "due_at", record.DueAt)
+	pb.SetString(reflection, "scope_json", record.ScopeJSON)
+	pb.SetString(reflection, "links_json", record.LinksJSON)
+	reflection.Set(pb.FieldByName(reflection, "salience"), protoreflect.ValueOfFloat64(record.Salience))
+	reflection.Set(pb.FieldByName(reflection, "confidence"), protoreflect.ValueOfFloat64(record.Confidence))
+	pb.SetBool(reflection, "archived", record.Archived)
+	pb.SetString(reflection, "created_at", record.CreatedAt)
+	pb.SetString(reflection, "updated_at", record.UpdatedAt)
+	return message
+}
+
+func protoBrainSuggestionMessage(schema *pb.Schema, record enginebridge.BrainSuggestion) proto.Message {
+	message := schema.NewMessage("openpinch.v1.BrainSuggestion")
+	reflection := message.ProtoReflect()
+	pb.SetString(reflection, "id", record.ID)
+	pb.SetString(reflection, "task_id", record.TaskID)
+	pb.SetString(reflection, "summary", record.Summary)
+	pb.SetString(reflection, "reason", record.Reason)
+	reflection.Set(pb.FieldByName(reflection, "score"), protoreflect.ValueOfFloat64(record.Score))
+	pb.SetString(reflection, "context_json", record.ContextJSON)
+	return message
+}
+
+func appendBrainEntities(schema *pb.Schema, message protoreflect.Message, name string, records []enginebridge.BrainEntity) {
+	field := pb.FieldByName(message, name)
+	list := message.Mutable(field).List()
+	for _, record := range records {
+		list.Append(protoreflect.ValueOfMessage(protoBrainEntityMessage(schema, record).ProtoReflect()))
+	}
+}
+
+func appendBrainFacts(schema *pb.Schema, message protoreflect.Message, name string, records []enginebridge.BrainFact) {
+	field := pb.FieldByName(message, name)
+	list := message.Mutable(field).List()
+	for _, record := range records {
+		list.Append(protoreflect.ValueOfMessage(protoBrainFactMessage(schema, record).ProtoReflect()))
+	}
+}
+
+func appendBrainRelations(schema *pb.Schema, message protoreflect.Message, name string, records []enginebridge.BrainRelation) {
+	field := pb.FieldByName(message, name)
+	list := message.Mutable(field).List()
+	for _, record := range records {
+		list.Append(protoreflect.ValueOfMessage(protoBrainRelationMessage(schema, record).ProtoReflect()))
+	}
+}
+
+func appendBrainTasks(schema *pb.Schema, message protoreflect.Message, name string, records []enginebridge.BrainTask) {
+	field := pb.FieldByName(message, name)
+	list := message.Mutable(field).List()
+	for _, record := range records {
+		list.Append(protoreflect.ValueOfMessage(protoBrainTaskMessage(schema, record).ProtoReflect()))
+	}
+}
+
+func repeatedStrings(message protoreflect.Message, name string) []string {
+	field := pb.FieldByName(message, name)
+	list := message.Get(field).List()
+	values := make([]string, 0, list.Len())
+	for i := 0; i < list.Len(); i++ {
+		values = append(values, list.Get(i).String())
+	}
+	return values
 }
 
 func logChunkMessage(schema *pb.Schema, line string) proto.Message {

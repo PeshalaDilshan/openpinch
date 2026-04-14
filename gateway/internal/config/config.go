@@ -14,6 +14,7 @@ type Config struct {
 	Skills       SkillsConfig               `toml:"skills"`
 	Connectors   map[string]ConnectorConfig `toml:"connectors"`
 	Security     SecurityConfig             `toml:"security"`
+	Brain        BrainConfig                `toml:"brain"`
 	SIEM         SiemConfig                 `toml:"siem"`
 	Operator     OperatorConfig             `toml:"operator"`
 	VectorMemory VectorMemoryConfig         `toml:"vector_memory"`
@@ -60,6 +61,18 @@ type ConnectorConfig struct {
 type SecurityConfig struct {
 	Attestation AttestationConfig `toml:"attestation"`
 	Audit       AuditConfig       `toml:"audit"`
+}
+
+type BrainConfig struct {
+	Enabled                        bool   `toml:"enabled"`
+	AutoIngestMessages             bool   `toml:"auto_ingest_messages"`
+	AutoIngestToolResults          bool   `toml:"auto_ingest_tool_results"`
+	AutoIngestAssistantCommitments bool   `toml:"auto_ingest_assistant_commitments"`
+	InlineSuggestionsInReplies     bool   `toml:"inline_suggestions_in_replies"`
+	MaxInlineSuggestions           uint64 `toml:"max_inline_suggestions"`
+	ContextBudgetChars             uint64 `toml:"context_budget_chars"`
+	ArchiveDecayDays               int64  `toml:"archive_decay_days"`
+	StaleTaskHours                 int64  `toml:"stale_task_hours"`
 }
 
 type AttestationConfig struct {
