@@ -333,15 +333,25 @@ func (s *Service) handleAPIModelProfiles(w http.ResponseWriter, r *http.Request)
 
 func (s *Service) handleUI(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Gateway.Web.UIDir != "" {
-		candidate := filepath.Join(s.cfg.Gateway.Web.UIDir, filepath.Clean(strings.TrimPrefix(r.URL.Path, "/")))
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			http.ServeFile(w, r, candidate)
-			return
-		}
-		index := filepath.Join(s.cfg.Gateway.Web.UIDir, "index.html")
-		if _, err := os.Stat(index); err == nil {
-			http.ServeFile(w, r, index)
-			return
+		baseDirAbs, err := filepath.Abs(s.cfg.Gateway.Web.UIDir)
+		if err == nil {
+			requestPath := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
+			candidate := filepath.Join(baseDirAbs, requestPath)
+			candidateAbs, err := filepath.Abs(candidate)
+			if err == nil {
+				rel, relErr := filepath.Rel(baseDirAbs, candidateAbs)
+				if relErr == nil && !filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					if info, statErr := os.Stat(candidateAbs); statErr == nil && !info.IsDir() {
+						http.ServeFile(w, r, candidateAbs)
+						return
+					}
+				}
+			}
+			index := filepath.Join(baseDirAbs, "index.html")
+			if _, err := os.Stat(index); err == nil {
+				http.ServeFile(w, r, index)
+				return
+			}
 		}
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
