@@ -1514,6 +1514,43 @@ struct BrainTaskPayload {
     source_ref: String,
 }
 
+struct EntityUpsert {
+    entity_id: String,
+    kind: String,
+    subtype: String,
+    title: String,
+    content: String,
+    scope_json: String,
+    links_json: String,
+    salience: f64,
+    confidence: f64,
+    source_ref: String,
+}
+
+struct FactUpsert {
+    fact_id: String,
+    entity_id: String,
+    content: String,
+    scope_json: String,
+    salience: f64,
+    confidence: f64,
+    source_ref: String,
+}
+
+struct TaskUpsert {
+    task_id: Option<String>,
+    title: String,
+    summary: String,
+    status: String,
+    priority: String,
+    due_at: Option<DateTime<Utc>>,
+    scope_json: String,
+    links_json: String,
+    salience: f64,
+    confidence: f64,
+    source_ref: String,
+}
+
 #[derive(Debug, Clone)]
 struct ProjectionHit {
     key: String,
@@ -1573,23 +1610,23 @@ impl BrainManager {
         ));
 
         if request.kind == "task" {
-            let task = self.upsert_or_merge_task(
-                None,
-                preferred_title(&request.title, &request.content),
-                non_empty_or_default(&request.content, &request.title),
-                if request.scope_json.is_empty() {
+            let task = self.upsert_or_merge_task(TaskUpsert {
+                task_id: None,
+                title: preferred_title(&request.title, &request.content),
+                summary: non_empty_or_default(&request.content, &request.title),
+                status: "open".to_owned(),
+                priority: task_priority_from_text(&request.content),
+                due_at: parse_due_at(&request.content),
+                scope_json: if request.scope_json.is_empty() {
                     "{}".to_owned()
                 } else {
                     request.scope_json.clone()
                 },
-                request.links_json.clone(),
-                default_source_ref(&source_ref, &request.title, "task"),
-                "open".to_owned(),
-                task_priority_from_text(&request.content),
-                parse_due_at(&request.content),
-                request.importance.max(0.45),
-                0.92,
-            )?;
+                links_json: request.links_json.clone(),
+                salience: request.importance.max(0.45),
+                confidence: 0.92,
+                source_ref: default_source_ref(&source_ref, &request.title, "task"),
+            })?;
             self.record_ingest(
                 &source_ref,
                 "remember",
@@ -1624,32 +1661,32 @@ impl BrainManager {
             request.subtype,
             prompt_hash(&format!("{}:{}", request.title, scope_json))
         );
-        let entity = self.upsert_entity(
-            &entity_id,
-            &request.kind,
-            &request.subtype,
-            &preferred_title(&request.title, &request.content),
-            &request.content,
-            &scope_json,
-            &links_json,
-            request.importance.max(0.4),
-            0.95,
-            &source_ref,
-        )?;
+        let entity = self.upsert_entity(EntityUpsert {
+            entity_id,
+            kind: request.kind.clone(),
+            subtype: request.subtype.clone(),
+            title: preferred_title(&request.title, &request.content),
+            content: request.content.clone(),
+            scope_json: scope_json.clone(),
+            links_json: links_json.clone(),
+            salience: request.importance.max(0.4),
+            confidence: 0.95,
+            source_ref: source_ref.clone(),
+        })?;
         let fact_id = format!(
             "fact:{}:{}",
             entity.id,
             prompt_hash(&format!("{}:{}", source_ref, request.content))
         );
-        let _ = self.upsert_fact(
-            &fact_id,
-            &entity.id,
-            &request.content,
-            &scope_json,
-            request.importance.max(0.35),
-            0.9,
-            &source_ref,
-        )?;
+        let _ = self.upsert_fact(FactUpsert {
+            fact_id,
+            entity_id: entity.id.clone(),
+            content: request.content.clone(),
+            scope_json: scope_json.clone(),
+            salience: request.importance.max(0.35),
+            confidence: 0.9,
+            source_ref: source_ref.clone(),
+        })?;
         self.link_record(&entity.id, &request.kind, &links_json, &source_ref)?;
         self.record_ingest(
             &source_ref,
@@ -1959,21 +1996,21 @@ impl BrainManager {
                 .map(|task| task.summary.clone())
                 .unwrap_or_else(|| task_id.clone()),
         );
-        let task = self.upsert_task(
-            &task_id,
-            &preferred_title(&summary, &summary),
-            &summary,
-            &request.status,
-            &priority,
-            request
+        let task = self.upsert_task(TaskUpsert {
+            task_id: Some(task_id.clone()),
+            title: preferred_title(&summary, &summary),
+            summary,
+            status: request.status,
+            priority,
+            due_at: request
                 .due_at
                 .or_else(|| existing.as_ref().and_then(|task| task.due_at)),
-            &scope_json,
-            &links_json,
-            0.8,
-            0.95,
-            &default_source_ref(&request.source_ref, &task_id, "task-update"),
-        )?;
+            scope_json,
+            links_json: links_json.clone(),
+            salience: 0.8,
+            confidence: 0.95,
+            source_ref: default_source_ref(&request.source_ref, &task_id, "task-update"),
+        })?;
         self.link_record(
             &task.id,
             "task",
@@ -2098,25 +2135,25 @@ impl BrainManager {
             prompt_hash(&message.body)
         );
         let scope_json = self.scope_for_message(message);
-        let contact = self.upsert_entity(
-            &format!(
+        let contact = self.upsert_entity(EntityUpsert {
+            entity_id: format!(
                 "person:contact:{}:{}",
                 message.connector,
                 prompt_hash(&message.sender)
             ),
-            "person",
-            "contact",
-            &message.sender,
-            &format!(
+            kind: "person".to_owned(),
+            subtype: "contact".to_owned(),
+            title: message.sender.clone(),
+            content: format!(
                 "Observed through {} in channel {}",
                 message.connector, message.channel_id
             ),
-            &scope_json,
-            "[]",
-            0.58,
-            0.96,
-            &source_ref,
-        )?;
+            scope_json: scope_json.clone(),
+            links_json: "[]".to_owned(),
+            salience: 0.58,
+            confidence: 0.96,
+            source_ref: source_ref.clone(),
+        })?;
         self.upsert_relation(
             "knows",
             &self.inner.owner_id,
@@ -2134,30 +2171,30 @@ impl BrainManager {
             0.65,
             false,
         )?;
-        let _ = self.upsert_fact(
-            &format!("fact:{}:{}", contact.id, prompt_hash(&source_ref)),
-            &contact.id,
-            &message.body,
-            &scope_json,
-            0.62,
-            0.84,
-            &source_ref,
-        )?;
+        let _ = self.upsert_fact(FactUpsert {
+            fact_id: format!("fact:{}:{}", contact.id, prompt_hash(&source_ref)),
+            entity_id: contact.id.clone(),
+            content: message.body.clone(),
+            scope_json: scope_json.clone(),
+            salience: 0.62,
+            confidence: 0.84,
+            source_ref: source_ref.clone(),
+        })?;
 
         let mut linked_ids = vec![contact.id.clone()];
         for artifact in extract_artifacts(&message.body) {
-            let entity = self.upsert_entity(
-                &format!("artifact:{}", prompt_hash(&artifact)),
-                "artifact",
-                "reference",
-                &artifact,
-                &format!("Referenced in inbound {} message", message.connector),
-                &scope_json,
-                "[]",
-                0.56,
-                0.85,
-                &source_ref,
-            )?;
+            let entity = self.upsert_entity(EntityUpsert {
+                entity_id: format!("artifact:{}", prompt_hash(&artifact)),
+                kind: "artifact".to_owned(),
+                subtype: "reference".to_owned(),
+                title: artifact.clone(),
+                content: format!("Referenced in inbound {} message", message.connector),
+                scope_json: scope_json.clone(),
+                links_json: "[]".to_owned(),
+                salience: 0.56,
+                confidence: 0.85,
+                source_ref: source_ref.clone(),
+            })?;
             self.upsert_relation(
                 "mentioned_with",
                 &contact.id,
@@ -2170,18 +2207,18 @@ impl BrainManager {
         }
 
         for (subtype, title) in extract_environment_mentions(&message.body) {
-            let entity = self.upsert_entity(
-                &format!("environment:{}:{}", subtype, prompt_hash(&title)),
-                "environment",
-                &subtype,
-                &title,
-                &format!("Mentioned {} context", subtype),
-                &scope_json,
-                "[]",
-                0.52,
-                0.78,
-                &source_ref,
-            )?;
+            let entity = self.upsert_entity(EntityUpsert {
+                entity_id: format!("environment:{}:{}", subtype, prompt_hash(&title)),
+                kind: "environment".to_owned(),
+                subtype: subtype.clone(),
+                title: title.clone(),
+                content: format!("Mentioned {} context", subtype),
+                scope_json: scope_json.clone(),
+                links_json: "[]".to_owned(),
+                salience: 0.52,
+                confidence: 0.78,
+                source_ref: source_ref.clone(),
+            })?;
             self.upsert_relation(
                 "mentioned_with",
                 &contact.id,
@@ -2194,19 +2231,19 @@ impl BrainManager {
         }
 
         if let Some(summary) = extract_task_summary(&message.body) {
-            let task = self.upsert_or_merge_task(
-                None,
-                preferred_title(&summary, &summary),
+            let task = self.upsert_or_merge_task(TaskUpsert {
+                task_id: None,
+                title: preferred_title(&summary, &summary),
                 summary,
-                scope_json.clone(),
-                serde_json::to_string(&linked_ids).unwrap_or_else(|_| "[]".to_owned()),
-                source_ref.clone(),
-                "open".to_owned(),
-                task_priority_from_text(&message.body),
-                parse_due_at(&message.body),
-                0.84,
-                0.88,
-            )?;
+                status: "open".to_owned(),
+                priority: task_priority_from_text(&message.body),
+                due_at: parse_due_at(&message.body),
+                scope_json: scope_json.clone(),
+                links_json: serde_json::to_string(&linked_ids).unwrap_or_else(|_| "[]".to_owned()),
+                salience: 0.84,
+                confidence: 0.88,
+                source_ref: source_ref.clone(),
+            })?;
             self.upsert_relation(
                 "assigned_to",
                 &task.id,
@@ -2251,55 +2288,58 @@ impl BrainManager {
         })
         .to_string();
         let result_summary = non_empty_or_default(&outcome.summary, &call.target);
-        let artifact = self.upsert_entity(
-            &format!("artifact:tool:{}", prompt_hash(&call.target)),
-            "artifact",
-            "tool-result",
-            &call.target,
-            &format!("Successful tool execution: {}", result_summary),
-            &scope_json,
-            "[]",
-            0.68,
-            0.92,
-            &source_ref,
-        )?;
-        let _ = self.upsert_fact(
-            &format!("fact:{}:{}", artifact.id, prompt_hash(&source_ref)),
-            &artifact.id,
-            &truncate_with_ellipsis(&format!("{} {}", result_summary, outcome.data_json), 400),
-            &scope_json,
-            0.7,
-            0.9,
-            &source_ref,
-        )?;
-        let _ = self.upsert_fact(
-            &format!(
+        let artifact = self.upsert_entity(EntityUpsert {
+            entity_id: format!("artifact:tool:{}", prompt_hash(&call.target)),
+            kind: "artifact".to_owned(),
+            subtype: "tool-result".to_owned(),
+            title: call.target.clone(),
+            content: format!("Successful tool execution: {}", result_summary),
+            scope_json: scope_json.clone(),
+            links_json: "[]".to_owned(),
+            salience: 0.68,
+            confidence: 0.92,
+            source_ref: source_ref.clone(),
+        })?;
+        let _ = self.upsert_fact(FactUpsert {
+            fact_id: format!("fact:{}:{}", artifact.id, prompt_hash(&source_ref)),
+            entity_id: artifact.id.clone(),
+            content: truncate_with_ellipsis(
+                &format!("{} {}", result_summary, outcome.data_json),
+                400,
+            ),
+            scope_json: scope_json.clone(),
+            salience: 0.7,
+            confidence: 0.9,
+            source_ref: source_ref.clone(),
+        })?;
+        let _ = self.upsert_fact(FactUpsert {
+            fact_id: format!(
                 "fact:{}:{}",
                 self.inner.workspace_env_id,
                 prompt_hash(&call.target)
             ),
-            &self.inner.workspace_env_id,
-            &format!("Tool {} succeeded with {}", call.target, result_summary),
-            &scope_json,
-            0.58,
-            0.86,
-            &source_ref,
-        )?;
+            entity_id: self.inner.workspace_env_id.clone(),
+            content: format!("Tool {} succeeded with {}", call.target, result_summary),
+            scope_json: scope_json.clone(),
+            salience: 0.58,
+            confidence: 0.86,
+            source_ref: source_ref.clone(),
+        })?;
 
         if let Some(task) = self.find_related_tool_task(&call.target, &result_summary) {
-            let _ = self.upsert_task(
-                &task.id,
-                &task.title,
-                &task.summary,
-                "done",
-                &task.priority,
-                task.due_at,
-                &task.scope_json,
-                &task.links_json,
-                task.salience,
-                0.96,
-                &source_ref,
-            )?;
+            let _ = self.upsert_task(TaskUpsert {
+                task_id: Some(task.id.clone()),
+                title: task.title.clone(),
+                summary: task.summary.clone(),
+                status: "done".to_owned(),
+                priority: task.priority.clone(),
+                due_at: task.due_at,
+                scope_json: task.scope_json.clone(),
+                links_json: task.links_json.clone(),
+                salience: task.salience,
+                confidence: 0.96,
+                source_ref: source_ref.clone(),
+            })?;
         }
 
         self.record_ingest(
@@ -2323,20 +2363,20 @@ impl BrainManager {
         );
         let scope_json = self.scope_for_message(message);
         if let Some(summary) = extract_assistant_commitment(reply) {
-            let task = self.upsert_or_merge_task(
-                None,
-                preferred_title(&summary, reply),
-                summary.clone(),
-                scope_json.clone(),
-                serde_json::to_string(&vec![self.inner.owner_id.clone()])
+            let task = self.upsert_or_merge_task(TaskUpsert {
+                task_id: None,
+                title: preferred_title(&summary, reply),
+                summary: summary.clone(),
+                status: "in_progress".to_owned(),
+                priority: task_priority_from_text(reply),
+                due_at: parse_due_at(reply),
+                scope_json: scope_json.clone(),
+                links_json: serde_json::to_string(&vec![self.inner.owner_id.clone()])
                     .unwrap_or_else(|_| "[]".to_owned()),
-                source_ref.clone(),
-                "in_progress".to_owned(),
-                task_priority_from_text(reply),
-                parse_due_at(reply),
-                0.74,
-                0.72,
-            )?;
+                salience: 0.74,
+                confidence: 0.72,
+                source_ref: source_ref.clone(),
+            })?;
             self.upsert_relation(
                 "assigned_to",
                 &task.id,
@@ -2446,54 +2486,54 @@ impl BrainManager {
         })
         .to_string();
 
-        let _ = self.upsert_entity(
-            &self.inner.owner_id,
-            "person",
-            "owner",
-            "Local Owner",
-            "Primary local OpenPinch operator",
-            "{}",
-            "[]",
-            0.95,
-            0.99,
-            "brain:baseline",
-        )?;
-        let _ = self.upsert_entity(
-            &self.inner.runtime_env_id,
-            "environment",
-            "runtime",
-            &format!("{} runtime", std::env::consts::OS),
-            &format!("OpenPinch runtime on {}", std::env::consts::OS),
-            &runtime_scope,
-            "[]",
-            0.82,
-            0.98,
-            "brain:baseline",
-        )?;
-        let _ = self.upsert_entity(
-            &self.inner.workspace_env_id,
-            "environment",
-            "workspace",
-            &workspace_title,
-            &format!("Workspace rooted at {}", workspace_root.display()),
-            &workspace_scope,
-            "[]",
-            0.84,
-            0.98,
-            "brain:baseline",
-        )?;
-        let _ = self.upsert_entity(
-            &self.inner.project_env_id,
-            "environment",
-            "project",
-            &workspace_title,
-            &format!("Project context for {}", workspace_title),
-            &project_scope,
-            "[]",
-            0.8,
-            0.94,
-            "brain:baseline",
-        )?;
+        let _ = self.upsert_entity(EntityUpsert {
+            entity_id: self.inner.owner_id.clone(),
+            kind: "person".to_owned(),
+            subtype: "owner".to_owned(),
+            title: "Local Owner".to_owned(),
+            content: "Primary local OpenPinch operator".to_owned(),
+            scope_json: "{}".to_owned(),
+            links_json: "[]".to_owned(),
+            salience: 0.95,
+            confidence: 0.99,
+            source_ref: "brain:baseline".to_owned(),
+        })?;
+        let _ = self.upsert_entity(EntityUpsert {
+            entity_id: self.inner.runtime_env_id.clone(),
+            kind: "environment".to_owned(),
+            subtype: "runtime".to_owned(),
+            title: format!("{} runtime", std::env::consts::OS),
+            content: format!("OpenPinch runtime on {}", std::env::consts::OS),
+            scope_json: runtime_scope,
+            links_json: "[]".to_owned(),
+            salience: 0.82,
+            confidence: 0.98,
+            source_ref: "brain:baseline".to_owned(),
+        })?;
+        let _ = self.upsert_entity(EntityUpsert {
+            entity_id: self.inner.workspace_env_id.clone(),
+            kind: "environment".to_owned(),
+            subtype: "workspace".to_owned(),
+            title: workspace_title.clone(),
+            content: format!("Workspace rooted at {}", workspace_root.display()),
+            scope_json: workspace_scope,
+            links_json: "[]".to_owned(),
+            salience: 0.84,
+            confidence: 0.98,
+            source_ref: "brain:baseline".to_owned(),
+        })?;
+        let _ = self.upsert_entity(EntityUpsert {
+            entity_id: self.inner.project_env_id.clone(),
+            kind: "environment".to_owned(),
+            subtype: "project".to_owned(),
+            title: workspace_title.clone(),
+            content: format!("Project context for {}", workspace_title),
+            scope_json: project_scope,
+            links_json: "[]".to_owned(),
+            salience: 0.8,
+            confidence: 0.94,
+            source_ref: "brain:baseline".to_owned(),
+        })?;
         self.upsert_relation(
             "owns",
             &self.inner.owner_id,
@@ -2568,29 +2608,17 @@ impl BrainManager {
         Ok(())
     }
 
-    fn upsert_entity(
-        &self,
-        entity_id: &str,
-        kind: &str,
-        subtype: &str,
-        title: &str,
-        content: &str,
-        scope_json: &str,
-        links_json: &str,
-        salience: f64,
-        confidence: f64,
-        source_ref: &str,
-    ) -> Result<BrainEntityRecord> {
-        validate_entity_kind(kind)?;
-        if kind == "environment" && !subtype.is_empty() {
-            validate_environment_subtype(subtype)?;
+    fn upsert_entity(&self, input: EntityUpsert) -> Result<BrainEntityRecord> {
+        validate_entity_kind(&input.kind)?;
+        if input.kind == "environment" && !input.subtype.is_empty() {
+            validate_environment_subtype(&input.subtype)?;
         }
         let payload = BrainEntityPayload {
-            title: title.to_owned(),
-            content: content.to_owned(),
-            scope_json: scope_json.to_owned(),
-            links_json: links_json.to_owned(),
-            source_ref: source_ref.to_owned(),
+            title: input.title.clone(),
+            content: input.content.clone(),
+            scope_json: input.scope_json.clone(),
+            links_json: input.links_json.clone(),
+            source_ref: input.source_ref.clone(),
         };
         let encrypted_blob_json = self.encrypt_payload(&payload)?;
         let now = Utc::now();
@@ -2600,56 +2628,50 @@ impl BrainManager {
              values (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?9)
              on conflict(entity_id) do update set entity_kind = excluded.entity_kind, subtype = excluded.subtype, encrypted_blob_json = excluded.encrypted_blob_json, salience = excluded.salience, confidence = excluded.confidence, fingerprint = excluded.fingerprint, archived = 0, source_ref = excluded.source_ref, updated_at = excluded.updated_at",
             params![
-                entity_id,
-                kind,
-                subtype,
+                input.entity_id,
+                input.kind,
+                input.subtype,
                 encrypted_blob_json,
-                salience,
-                confidence,
-                fingerprint(&format!("{} {} {}", title, content, scope_json)),
-                source_ref,
+                input.salience,
+                input.confidence,
+                fingerprint(&format!(
+                    "{} {} {}",
+                    input.title, input.content, input.scope_json
+                )),
+                input.source_ref,
                 now.to_rfc3339(),
             ],
         )?;
         drop(connection);
 
         let record = BrainEntityRecord {
-            id: entity_id.to_owned(),
-            kind: kind.to_owned(),
-            subtype: subtype.to_owned(),
-            title: title.to_owned(),
-            content: content.to_owned(),
-            scope_json: scope_json.to_owned(),
-            links_json: links_json.to_owned(),
-            salience,
-            confidence,
+            id: input.entity_id,
+            kind: input.kind,
+            subtype: input.subtype,
+            title: input.title,
+            content: input.content,
+            scope_json: input.scope_json,
+            links_json: input.links_json,
+            salience: input.salience,
+            confidence: input.confidence,
             archived: false,
             created_at: now,
             updated_at: now,
         };
         self.upsert_projection(
             "brain-entities",
-            entity_id,
+            &record.id,
             &entity_projection(&record),
-            &json!({ "kind": kind, "subtype": subtype }).to_string(),
+            &json!({ "kind": record.kind, "subtype": record.subtype }).to_string(),
         )?;
         Ok(record)
     }
 
-    fn upsert_fact(
-        &self,
-        fact_id: &str,
-        entity_id: &str,
-        content: &str,
-        scope_json: &str,
-        salience: f64,
-        confidence: f64,
-        source_ref: &str,
-    ) -> Result<BrainFactRecord> {
+    fn upsert_fact(&self, input: FactUpsert) -> Result<BrainFactRecord> {
         let payload = BrainFactPayload {
-            content: content.to_owned(),
-            scope_json: scope_json.to_owned(),
-            source_ref: source_ref.to_owned(),
+            content: input.content.clone(),
+            scope_json: input.scope_json.clone(),
+            source_ref: input.source_ref.clone(),
         };
         let encrypted_blob_json = self.encrypt_payload(&payload)?;
         let now = Utc::now();
@@ -2659,34 +2681,34 @@ impl BrainManager {
              values (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?8)
              on conflict(fact_id) do update set entity_id = excluded.entity_id, encrypted_blob_json = excluded.encrypted_blob_json, salience = excluded.salience, confidence = excluded.confidence, fingerprint = excluded.fingerprint, archived = 0, source_ref = excluded.source_ref, updated_at = excluded.updated_at",
             params![
-                fact_id,
-                entity_id,
+                input.fact_id,
+                input.entity_id,
                 encrypted_blob_json,
-                salience,
-                confidence,
-                fingerprint(content),
-                source_ref,
+                input.salience,
+                input.confidence,
+                fingerprint(&input.content),
+                input.source_ref,
                 now.to_rfc3339(),
             ],
         )?;
         drop(connection);
 
         let record = BrainFactRecord {
-            id: fact_id.to_owned(),
-            entity_id: entity_id.to_owned(),
-            content: content.to_owned(),
-            scope_json: scope_json.to_owned(),
-            salience,
-            confidence,
+            id: input.fact_id,
+            entity_id: input.entity_id,
+            content: input.content,
+            scope_json: input.scope_json,
+            salience: input.salience,
+            confidence: input.confidence,
             archived: false,
             created_at: now,
             updated_at: now,
         };
         self.upsert_projection(
             "brain-facts",
-            fact_id,
+            &record.id,
             &fact_projection(&record),
-            &json!({ "entity_id": entity_id }).to_string(),
+            &json!({ "entity_id": record.entity_id }).to_string(),
         )?;
         Ok(record)
     }
@@ -2734,27 +2756,20 @@ impl BrainManager {
         })
     }
 
-    fn upsert_task(
-        &self,
-        task_id: &str,
-        title: &str,
-        summary: &str,
-        status: &str,
-        priority: &str,
-        due_at: Option<DateTime<Utc>>,
-        scope_json: &str,
-        links_json: &str,
-        salience: f64,
-        confidence: f64,
-        source_ref: &str,
-    ) -> Result<BrainTaskRecord> {
-        validate_task_status(status)?;
+    fn upsert_task(&self, input: TaskUpsert) -> Result<BrainTaskRecord> {
+        let task_id = input.task_id.unwrap_or_else(|| {
+            format!(
+                "task:{}",
+                prompt_hash(&format!("{}:{}", input.summary, input.scope_json))
+            )
+        });
+        validate_task_status(&input.status)?;
         let payload = BrainTaskPayload {
-            title: title.to_owned(),
-            summary: summary.to_owned(),
-            scope_json: scope_json.to_owned(),
-            links_json: links_json.to_owned(),
-            source_ref: source_ref.to_owned(),
+            title: input.title.clone(),
+            summary: input.summary.clone(),
+            scope_json: input.scope_json.clone(),
+            links_json: input.links_json.clone(),
+            source_ref: input.source_ref.clone(),
         };
         let encrypted_blob_json = self.encrypt_payload(&payload)?;
         let now = Utc::now();
@@ -2765,87 +2780,66 @@ impl BrainManager {
              on conflict(task_id) do update set status = excluded.status, priority = excluded.priority, due_at = excluded.due_at, encrypted_blob_json = excluded.encrypted_blob_json, salience = excluded.salience, confidence = excluded.confidence, fingerprint = excluded.fingerprint, archived = 0, source_ref = excluded.source_ref, updated_at = excluded.updated_at",
             params![
                 task_id,
-                status,
-                priority,
-                due_at.map(|value| value.to_rfc3339()),
+                input.status,
+                input.priority,
+                input.due_at.map(|value| value.to_rfc3339()),
                 encrypted_blob_json,
-                salience,
-                confidence,
-                fingerprint(&format!("{} {}", title, summary)),
-                source_ref,
+                input.salience,
+                input.confidence,
+                fingerprint(&format!("{} {}", input.title, input.summary)),
+                input.source_ref,
                 now.to_rfc3339(),
             ],
         )?;
         drop(connection);
 
         let record = BrainTaskRecord {
-            id: task_id.to_owned(),
-            title: title.to_owned(),
-            summary: summary.to_owned(),
-            status: status.to_owned(),
-            priority: priority.to_owned(),
-            due_at,
-            scope_json: scope_json.to_owned(),
-            links_json: links_json.to_owned(),
-            salience,
-            confidence,
+            id: task_id,
+            title: input.title,
+            summary: input.summary,
+            status: input.status,
+            priority: input.priority,
+            due_at: input.due_at,
+            scope_json: input.scope_json,
+            links_json: input.links_json,
+            salience: input.salience,
+            confidence: input.confidence,
             archived: false,
             created_at: now,
             updated_at: now,
         };
         self.upsert_projection(
             "brain-tasks",
-            task_id,
+            &record.id,
             &task_projection(&record),
-            &json!({ "status": status, "priority": priority }).to_string(),
+            &json!({ "status": record.status, "priority": record.priority }).to_string(),
         )?;
         self.upsert_projection(
             "brain-suggestions",
-            &format!("suggestion:{}", task_id),
+            &format!("suggestion:{}", record.id),
             &format!("{} {}", record.summary, record.priority),
-            &json!({ "task_id": task_id, "status": status }).to_string(),
+            &json!({ "task_id": record.id, "status": record.status }).to_string(),
         )?;
         Ok(record)
     }
 
-    fn upsert_or_merge_task(
-        &self,
-        task_id: Option<String>,
-        title: String,
-        summary: String,
-        scope_json: String,
-        links_json: String,
-        source_ref: String,
-        status: String,
-        priority: String,
-        due_at: Option<DateTime<Utc>>,
-        salience: f64,
-        confidence: f64,
-    ) -> Result<BrainTaskRecord> {
-        let target_id = task_id
+    fn upsert_or_merge_task(&self, input: TaskUpsert) -> Result<BrainTaskRecord> {
+        let target_id = input
+            .task_id
             .or_else(|| {
-                self.find_similar_task(&summary, &scope_json)
+                self.find_similar_task(&input.summary, &input.scope_json)
                     .map(|task| task.id)
             })
             .unwrap_or_else(|| {
                 format!(
                     "task:{}",
-                    prompt_hash(&format!("{}:{}", summary, scope_json))
+                    prompt_hash(&format!("{}:{}", input.summary, input.scope_json))
                 )
             });
-        self.upsert_task(
-            &target_id,
-            &title,
-            &summary,
-            &status,
-            &priority,
-            due_at,
-            &scope_json,
-            &links_json,
-            salience,
-            confidence,
-            &source_ref,
-        )
+        self.upsert_task(TaskUpsert {
+            task_id: Some(target_id),
+            ..input
+        })
     }
 
     fn link_record(
