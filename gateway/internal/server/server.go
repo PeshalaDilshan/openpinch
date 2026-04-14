@@ -27,6 +27,7 @@ type Service struct {
 	scheduler *scheduler.Scheduler
 	registry  *connectors.Registry
 	schema    *pb.Schema
+	events    *EventHub
 	startedAt time.Time
 }
 
@@ -43,6 +44,14 @@ type GatewayServiceServer interface {
 	ExportAudit(context.Context, proto.Message) (proto.Message, error)
 	QueryMemory(context.Context, proto.Message) (proto.Message, error)
 	UpsertMemory(context.Context, proto.Message) (proto.Message, error)
+	ListSessions(context.Context, proto.Message) (proto.Message, error)
+	GetSession(context.Context, proto.Message) (proto.Message, error)
+	PruneSessions(context.Context, proto.Message) (proto.Message, error)
+	ListPairings(context.Context, proto.Message) (proto.Message, error)
+	UpdatePairing(context.Context, proto.Message) (proto.Message, error)
+	SendChannelMessage(context.Context, proto.Message) (proto.Message, error)
+	GetDoctorReport(context.Context, proto.Message) (proto.Message, error)
+	ListModelProfiles(context.Context, proto.Message) (proto.Message, error)
 	RememberBrain(context.Context, proto.Message) (proto.Message, error)
 	RecallBrain(context.Context, proto.Message) (proto.Message, error)
 	SuggestBrain(context.Context, proto.Message) (proto.Message, error)
@@ -53,6 +62,7 @@ type GatewayServiceServer interface {
 	QueueTask(context.Context, proto.Message) (proto.Message, error)
 	GetPolicyReport(context.Context, proto.Message) (proto.Message, error)
 	TailLogs(proto.Message, grpc.ServerStream) error
+	StreamUiEvents(proto.Message, grpc.ServerStream) error
 }
 
 func New(cfg *config.Config, bridge *enginebridge.Client, scheduler *scheduler.Scheduler, registry *connectors.Registry) (*Service, error) {
@@ -66,6 +76,7 @@ func New(cfg *config.Config, bridge *enginebridge.Client, scheduler *scheduler.S
 		scheduler: scheduler,
 		registry:  registry,
 		schema:    schema,
+		events:    NewEventHub(),
 		startedAt: time.Now().UTC(),
 	}, nil
 }
@@ -87,6 +98,14 @@ func (s *Service) Register(server *grpc.Server) error {
 			{MethodName: "ExportAudit", Handler: unaryHandler("openpinch.v1.AuditExportRequest", s.ExportAudit)},
 			{MethodName: "QueryMemory", Handler: unaryHandler("openpinch.v1.MemoryQueryRequest", s.QueryMemory)},
 			{MethodName: "UpsertMemory", Handler: unaryHandler("openpinch.v1.MemoryUpsertRequest", s.UpsertMemory)},
+			{MethodName: "ListSessions", Handler: unaryHandler("openpinch.v1.SessionListRequest", s.ListSessions)},
+			{MethodName: "GetSession", Handler: unaryHandler("openpinch.v1.SessionRequest", s.GetSession)},
+			{MethodName: "PruneSessions", Handler: unaryHandler("openpinch.v1.SessionPruneRequest", s.PruneSessions)},
+			{MethodName: "ListPairings", Handler: unaryHandler("openpinch.v1.PairingListRequest", s.ListPairings)},
+			{MethodName: "UpdatePairing", Handler: unaryHandler("openpinch.v1.PairingUpdateRequest", s.UpdatePairing)},
+			{MethodName: "SendChannelMessage", Handler: unaryHandler("openpinch.v1.ChannelMessageRequest", s.SendChannelMessage)},
+			{MethodName: "GetDoctorReport", Handler: unaryHandler("openpinch.v1.DoctorReportRequest", s.GetDoctorReport)},
+			{MethodName: "ListModelProfiles", Handler: unaryHandler("openpinch.v1.Empty", s.ListModelProfiles)},
 			{MethodName: "RememberBrain", Handler: unaryHandler("openpinch.v1.BrainRememberRequest", s.RememberBrain)},
 			{MethodName: "RecallBrain", Handler: unaryHandler("openpinch.v1.BrainRecallRequest", s.RecallBrain)},
 			{MethodName: "SuggestBrain", Handler: unaryHandler("openpinch.v1.BrainSuggestRequest", s.SuggestBrain)},
@@ -99,6 +118,7 @@ func (s *Service) Register(server *grpc.Server) error {
 		},
 		Streams: []grpc.StreamDesc{
 			{StreamName: "TailLogs", Handler: streamHandler("openpinch.v1.LogRequest", s.TailLogs), ServerStreams: true},
+			{StreamName: "StreamUiEvents", Handler: streamHandler("openpinch.v1.UiEventStreamRequest", s.StreamUiEvents), ServerStreams: true},
 		},
 	}, s)
 	return nil
@@ -214,6 +234,25 @@ func (s *Service) SubmitMessage(ctx context.Context, request proto.Message) (pro
 	pb.SetBool(responseRef, "accepted", result.Accepted)
 	pb.SetString(responseRef, "message_id", result.MessageID)
 	pb.SetString(responseRef, "reply", result.Reply)
+	pb.SetString(responseRef, "session_id", result.SessionID)
+	pb.SetString(responseRef, "pairing_id", result.PairingID)
+	pb.SetString(responseRef, "delivery_state", result.DeliveryState)
+	s.events.Publish("message.inbound", map[string]any{
+		"connector":      pb.GetString(reflection, "connector"),
+		"channel_id":     pb.GetString(reflection, "channel_id"),
+		"sender":         pb.GetString(reflection, "sender"),
+		"body":           pb.GetString(reflection, "body"),
+		"session_id":     result.SessionID,
+		"delivery_state": result.DeliveryState,
+	})
+	if result.Reply != "" {
+		s.events.Publish("message.reply", map[string]any{
+			"connector":  pb.GetString(reflection, "connector"),
+			"channel_id": pb.GetString(reflection, "channel_id"),
+			"body":       result.Reply,
+			"session_id": result.SessionID,
+		})
+	}
 	return response, nil
 }
 
@@ -343,6 +382,179 @@ func (s *Service) UpsertMemory(ctx context.Context, request proto.Message) (prot
 	pb.SetBool(responseRef, "stored", stored)
 	pb.SetString(responseRef, "backend", backend)
 	pb.SetString(responseRef, "digest", digest)
+	return response, nil
+}
+
+func (s *Service) ListSessions(ctx context.Context, request proto.Message) (proto.Message, error) {
+	reflection := request.ProtoReflect()
+	sessions, summary, err := s.bridge.ListSessions(
+		ctx,
+		pb.GetString(reflection, "connector"),
+		pb.GetString(reflection, "status"),
+		pb.GetBool(reflection, "include_archived"),
+		pb.GetUint32(reflection, "limit"),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list sessions: %v", err)
+	}
+	response := s.schema.NewMessage("openpinch.v1.SessionListResponse")
+	responseRef := response.ProtoReflect()
+	pb.SetString(responseRef, "summary", summary)
+	field := pb.FieldByName(responseRef, "sessions")
+	list := responseRef.Mutable(field).List()
+	for _, record := range sessions {
+		list.Append(protoreflect.ValueOfMessage(protoSessionRecordMessage(s.schema, record).ProtoReflect()))
+	}
+	return response, nil
+}
+
+func (s *Service) GetSession(ctx context.Context, request proto.Message) (proto.Message, error) {
+	reflection := request.ProtoReflect()
+	detail, err := s.bridge.GetSession(
+		ctx,
+		pb.GetString(reflection, "session_id"),
+		pb.GetUint32(reflection, "limit"),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get session: %v", err)
+	}
+	response := s.schema.NewMessage("openpinch.v1.SessionResponse")
+	responseRef := response.ProtoReflect()
+	if detail.Session != nil {
+		pb.SetMessage(responseRef, "session", protoSessionRecordMessage(s.schema, *detail.Session))
+	}
+	field := pb.FieldByName(responseRef, "messages")
+	list := responseRef.Mutable(field).List()
+	for _, message := range detail.Messages {
+		list.Append(protoreflect.ValueOfMessage(protoSessionMessageMessage(s.schema, message).ProtoReflect()))
+	}
+	return response, nil
+}
+
+func (s *Service) PruneSessions(ctx context.Context, request proto.Message) (proto.Message, error) {
+	reflection := request.ProtoReflect()
+	pruned, err := s.bridge.PruneSessions(
+		ctx,
+		pb.GetUint32(reflection, "older_than_hours"),
+		pb.GetBool(reflection, "archive_only"),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "prune sessions: %v", err)
+	}
+	response := s.schema.NewMessage("openpinch.v1.SessionPruneResponse")
+	pb.SetUint32(response.ProtoReflect(), "pruned", pruned)
+	s.events.Publish("session.pruned", map[string]any{"pruned": pruned})
+	return response, nil
+}
+
+func (s *Service) ListPairings(ctx context.Context, request proto.Message) (proto.Message, error) {
+	reflection := request.ProtoReflect()
+	pairings, err := s.bridge.ListPairings(
+		ctx,
+		pb.GetString(reflection, "status"),
+		pb.GetString(reflection, "connector"),
+		pb.GetUint32(reflection, "limit"),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list pairings: %v", err)
+	}
+	response := s.schema.NewMessage("openpinch.v1.PairingListResponse")
+	field := pb.FieldByName(response.ProtoReflect(), "pairings")
+	list := response.ProtoReflect().Mutable(field).List()
+	for _, record := range pairings {
+		list.Append(protoreflect.ValueOfMessage(protoPairingRecordMessage(s.schema, record).ProtoReflect()))
+	}
+	return response, nil
+}
+
+func (s *Service) UpdatePairing(ctx context.Context, request proto.Message) (proto.Message, error) {
+	reflection := request.ProtoReflect()
+	pairing, err := s.bridge.UpdatePairing(
+		ctx,
+		pb.GetString(reflection, "pairing_id"),
+		pb.GetString(reflection, "action"),
+		pb.GetString(reflection, "note"),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "update pairing: %v", err)
+	}
+	response := s.schema.NewMessage("openpinch.v1.PairingUpdateResponse")
+	responseRef := response.ProtoReflect()
+	pb.SetBool(responseRef, "updated", true)
+	pb.SetMessage(responseRef, "pairing", protoPairingRecordMessage(s.schema, *pairing))
+	s.events.Publish("pairing.updated", pairing)
+	return response, nil
+}
+
+func (s *Service) SendChannelMessage(ctx context.Context, request proto.Message) (proto.Message, error) {
+	reflection := request.ProtoReflect()
+	connector := pb.GetString(reflection, "connector")
+	channelID := pb.GetString(reflection, "channel_id")
+	body := pb.GetString(reflection, "body")
+	if err := s.registry.SendMessage(ctx, connector, channelID, body); err != nil {
+		return nil, status.Errorf(codes.Internal, "send connector message: %v", err)
+	}
+	result, err := s.bridge.RecordOutboundMessage(
+		ctx,
+		connector,
+		channelID,
+		pb.GetString(reflection, "sender"),
+		body,
+		pb.GetString(reflection, "metadata_json"),
+		pb.GetString(reflection, "session_id"),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "record outbound message: %v", err)
+	}
+	response := s.schema.NewMessage("openpinch.v1.ChannelMessageResponse")
+	responseRef := response.ProtoReflect()
+	pb.SetBool(responseRef, "accepted", result.Accepted)
+	pb.SetString(responseRef, "message_id", result.MessageID)
+	pb.SetString(responseRef, "session_id", result.SessionID)
+	pb.SetString(responseRef, "status", result.Status)
+	pb.SetString(responseRef, "detail", result.Detail)
+	s.events.Publish("message.outbound", map[string]any{
+		"connector":  connector,
+		"channel_id": channelID,
+		"body":       body,
+		"session_id": result.SessionID,
+	})
+	return response, nil
+}
+
+func (s *Service) GetDoctorReport(ctx context.Context, request proto.Message) (proto.Message, error) {
+	reflection := request.ProtoReflect()
+	report, err := s.bridge.GetDoctorReport(
+		ctx,
+		pb.GetBool(reflection, "include_connectors"),
+		pb.GetBool(reflection, "include_models"),
+		pb.GetBool(reflection, "include_web"),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get doctor report: %v", err)
+	}
+	response := s.schema.NewMessage("openpinch.v1.DoctorReportResponse")
+	responseRef := response.ProtoReflect()
+	pb.SetString(responseRef, "status", report.Status)
+	field := pb.FieldByName(responseRef, "findings")
+	list := responseRef.Mutable(field).List()
+	for _, finding := range report.Findings {
+		list.Append(protoreflect.ValueOfMessage(protoDoctorFindingMessage(s.schema, finding).ProtoReflect()))
+	}
+	return response, nil
+}
+
+func (s *Service) ListModelProfiles(ctx context.Context, _ proto.Message) (proto.Message, error) {
+	profiles, err := s.bridge.ListModelProfiles(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list model profiles: %v", err)
+	}
+	response := s.schema.NewMessage("openpinch.v1.ModelProfileListResponse")
+	field := pb.FieldByName(response.ProtoReflect(), "profiles")
+	list := response.ProtoReflect().Mutable(field).List()
+	for _, profile := range profiles {
+		list.Append(protoreflect.ValueOfMessage(protoModelProfileMessage(s.schema, profile).ProtoReflect()))
+	}
 	return response, nil
 }
 
@@ -600,6 +812,28 @@ func (s *Service) TailLogs(request proto.Message, stream grpc.ServerStream) erro
 	}
 }
 
+func (s *Service) StreamUiEvents(_ proto.Message, stream grpc.ServerStream) error {
+	id, ch := s.events.Subscribe()
+	defer s.events.Unsubscribe(id)
+
+	for _, event := range s.events.History() {
+		if err := stream.SendMsg(protoUiEventMessage(s.schema, event)); err != nil {
+			return err
+		}
+	}
+
+	for {
+		select {
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		case event := <-ch:
+			if err := stream.SendMsg(protoUiEventMessage(s.schema, event)); err != nil {
+				return err
+			}
+		}
+	}
+}
+
 func unaryHandler(inputFullName string, handler func(context.Context, proto.Message) (proto.Message, error)) grpc.MethodHandler {
 	return func(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 		request := pb.MustLoad().NewMessage(inputFullName)
@@ -682,6 +916,95 @@ func protoMemoryRecordMessage(schema *pb.Schema, record enginebridge.MemoryRecor
 	pb.SetString(reflection, "metadata_json", record.MetadataJSON)
 	field := pb.FieldByName(reflection, "score")
 	reflection.Set(field, protoreflect.ValueOfFloat64(record.Score))
+	pb.SetString(reflection, "created_at", record.CreatedAt)
+	return message
+}
+
+func protoSessionRecordMessage(schema *pb.Schema, record enginebridge.SessionRecord) proto.Message {
+	message := schema.NewMessage("openpinch.v1.SessionRecord")
+	reflection := message.ProtoReflect()
+	pb.SetString(reflection, "id", record.ID)
+	pb.SetString(reflection, "connector", record.Connector)
+	pb.SetString(reflection, "channel_id", record.ChannelID)
+	pb.SetString(reflection, "participant", record.Participant)
+	pb.SetString(reflection, "session_type", record.SessionType)
+	pb.SetString(reflection, "title", record.Title)
+	pb.SetString(reflection, "status", record.Status)
+	pb.SetString(reflection, "reply_mode", record.ReplyMode)
+	pb.SetString(reflection, "queue_mode", record.QueueMode)
+	pb.SetString(reflection, "model_profile", record.ModelProfile)
+	pb.SetBool(reflection, "mention_only", record.MentionOnly)
+	pb.SetBool(reflection, "pending_pairing", record.PendingPairing)
+	pb.SetString(reflection, "last_message_preview", record.LastMessagePreview)
+	pb.SetUint32(reflection, "message_count", record.MessageCount)
+	pb.SetString(reflection, "created_at", record.CreatedAt)
+	pb.SetString(reflection, "updated_at", record.UpdatedAt)
+	return message
+}
+
+func protoSessionMessageMessage(schema *pb.Schema, record enginebridge.SessionMessage) proto.Message {
+	message := schema.NewMessage("openpinch.v1.SessionMessage")
+	reflection := message.ProtoReflect()
+	pb.SetString(reflection, "id", record.ID)
+	pb.SetString(reflection, "session_id", record.SessionID)
+	pb.SetString(reflection, "connector", record.Connector)
+	pb.SetString(reflection, "role", record.Role)
+	pb.SetString(reflection, "sender", record.Sender)
+	pb.SetString(reflection, "body", record.Body)
+	pb.SetString(reflection, "metadata_json", record.MetadataJSON)
+	pb.SetString(reflection, "created_at", record.CreatedAt)
+	return message
+}
+
+func protoPairingRecordMessage(schema *pb.Schema, record enginebridge.PairingRecord) proto.Message {
+	message := schema.NewMessage("openpinch.v1.PairingRecord")
+	reflection := message.ProtoReflect()
+	pb.SetString(reflection, "id", record.ID)
+	pb.SetString(reflection, "connector", record.Connector)
+	pb.SetString(reflection, "channel_id", record.ChannelID)
+	pb.SetString(reflection, "sender", record.Sender)
+	pb.SetString(reflection, "session_id", record.SessionID)
+	pb.SetString(reflection, "status", record.Status)
+	pb.SetString(reflection, "reason", record.Reason)
+	pb.SetString(reflection, "created_at", record.CreatedAt)
+	pb.SetString(reflection, "updated_at", record.UpdatedAt)
+	return message
+}
+
+func protoDoctorFindingMessage(schema *pb.Schema, record enginebridge.DoctorFinding) proto.Message {
+	message := schema.NewMessage("openpinch.v1.DoctorFinding")
+	reflection := message.ProtoReflect()
+	pb.SetString(reflection, "id", record.ID)
+	pb.SetString(reflection, "component", record.Component)
+	pb.SetString(reflection, "severity", record.Severity)
+	pb.SetString(reflection, "status", record.Status)
+	pb.SetString(reflection, "summary", record.Summary)
+	pb.SetString(reflection, "detail", record.Detail)
+	return message
+}
+
+func protoModelProfileMessage(schema *pb.Schema, record enginebridge.ModelProfile) proto.Message {
+	message := schema.NewMessage("openpinch.v1.ModelProfile")
+	reflection := message.ProtoReflect()
+	pb.SetString(reflection, "name", record.Name)
+	for _, provider := range record.ProviderOrder {
+		pb.AddString(reflection, "provider_order", provider)
+	}
+	pb.SetString(reflection, "mode", record.Mode)
+	pb.SetUint32(reflection, "timeout_seconds", record.TimeoutSeconds)
+	pb.SetUint32(reflection, "retry_budget", record.RetryBudget)
+	pb.SetBool(reflection, "hosted", record.Hosted)
+	pb.SetString(reflection, "auth_mode", record.AuthMode)
+	pb.SetBool(reflection, "default_profile", record.DefaultProfile)
+	return message
+}
+
+func protoUiEventMessage(schema *pb.Schema, record UiEvent) proto.Message {
+	message := schema.NewMessage("openpinch.v1.UiEvent")
+	reflection := message.ProtoReflect()
+	pb.SetString(reflection, "id", record.ID)
+	pb.SetString(reflection, "event_type", record.EventType)
+	pb.SetString(reflection, "payload_json", record.PayloadJSON)
 	pb.SetString(reflection, "created_at", record.CreatedAt)
 	return message
 }

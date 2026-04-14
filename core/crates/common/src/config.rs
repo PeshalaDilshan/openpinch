@@ -25,7 +25,23 @@ pub struct AppConfig {
     #[serde(default)]
     pub brain: BrainConfig,
     #[serde(default)]
+    pub sessions: SessionsConfig,
+    #[serde(default)]
+    pub routing: RoutingConfig,
+    #[serde(default)]
+    pub presence: PresenceConfig,
+    #[serde(default)]
+    pub usage: UsageConfig,
+    #[serde(default)]
+    pub media: MediaConfig,
+    #[serde(default)]
+    pub browser: BrowserConfig,
+    #[serde(default)]
     pub vector_memory: VectorMemoryConfig,
+    #[serde(default = "default_model_profiles")]
+    pub model_profiles: BTreeMap<String, ModelProfileConfig>,
+    #[serde(default)]
+    pub model_failover: ModelFailoverConfig,
     #[serde(default)]
     pub rbac: RbacConfig,
     #[serde(default)]
@@ -65,6 +81,22 @@ impl AppConfig {
             "gateway.binary" => self.gateway.binary = value.to_owned(),
             "gateway.engine_endpoint" => self.gateway.engine_endpoint = value.to_owned(),
             "gateway.telegram_bot_token" => self.gateway.telegram_bot_token = value.to_owned(),
+            "gateway.web.enabled" => {
+                self.gateway.web.enabled = value
+                    .parse()
+                    .context("expected bool for gateway.web.enabled")?
+            }
+            "gateway.web.listen_address" => self.gateway.web.listen_address = value.to_owned(),
+            "gateway.auth.enabled" => {
+                self.gateway.auth.enabled = value
+                    .parse()
+                    .context("expected bool for gateway.auth.enabled")?
+            }
+            "gateway.remote.enabled" => {
+                self.gateway.remote.enabled = value
+                    .parse()
+                    .context("expected bool for gateway.remote.enabled")?
+            }
             "gateway.tls.enabled" => {
                 self.gateway.tls.enabled = value
                     .parse()
@@ -149,6 +181,35 @@ impl AppConfig {
                     .parse()
                     .context("expected integer for brain.stale_task_hours")?
             }
+            "sessions.prune_after_hours" => {
+                self.sessions.prune_after_hours = value
+                    .parse()
+                    .context("expected integer for sessions.prune_after_hours")?
+            }
+            "routing.auto_pair_dm" => {
+                self.routing.auto_pair_dm = value
+                    .parse()
+                    .context("expected bool for routing.auto_pair_dm")?
+            }
+            "presence.enabled" => {
+                self.presence.enabled = value
+                    .parse()
+                    .context("expected bool for presence.enabled")?
+            }
+            "usage.enabled" => {
+                self.usage.enabled = value.parse().context("expected bool for usage.enabled")?
+            }
+            "media.max_upload_bytes" => {
+                self.media.max_upload_bytes = value
+                    .parse()
+                    .context("expected integer for media.max_upload_bytes")?
+            }
+            "browser.enabled" => {
+                self.browser.enabled = value.parse().context("expected bool for browser.enabled")?
+            }
+            "model_failover.default_profile" => {
+                self.model_failover.default_profile = value.to_owned()
+            }
             "vector_memory.default_namespace" => {
                 self.vector_memory.default_namespace = value.to_owned()
             }
@@ -215,7 +276,15 @@ impl Default for AppConfig {
             security: SecurityConfig::default(),
             agents: AgentsConfig::default(),
             brain: BrainConfig::default(),
+            sessions: SessionsConfig::default(),
+            routing: RoutingConfig::default(),
+            presence: PresenceConfig::default(),
+            usage: UsageConfig::default(),
+            media: MediaConfig::default(),
+            browser: BrowserConfig::default(),
             vector_memory: VectorMemoryConfig::default(),
+            model_profiles: default_model_profiles(),
+            model_failover: ModelFailoverConfig::default(),
             rbac: RbacConfig::default(),
             siem: SiemConfig::default(),
             operator: OperatorConfig::default(),
@@ -248,21 +317,33 @@ fn default_connectors() -> BTreeMap<String, ConnectorConfig> {
         "imap",
         "twilio-sms",
         "twilio-mms",
+        "webchat",
         "webhook-inbound",
         "webhook-outbound",
     ] {
         connectors.insert(
             name.to_owned(),
             ConnectorConfig {
-                enabled: name == "telegram",
+                enabled: name == "telegram" || name == "webchat",
                 mode: if name == "telegram" {
                     "polling".to_owned()
+                } else if name == "webchat" {
+                    "web".to_owned()
                 } else {
                     "disabled".to_owned()
                 },
                 endpoint: String::new(),
                 allowlist: Vec::new(),
                 api_first: true,
+                deferred: name != "telegram" && name != "webchat",
+                auth_mode: if name == "webchat" {
+                    "local-session".to_owned()
+                } else {
+                    "token".to_owned()
+                },
+                pair_dm: true,
+                chunk_limit: 1800,
+                mention_only: name != "telegram" && name != "webchat",
             },
         );
     }
@@ -337,6 +418,12 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub tls: GatewayTlsConfig,
     #[serde(default)]
+    pub web: GatewayWebConfig,
+    #[serde(default)]
+    pub auth: GatewayAuthConfig,
+    #[serde(default)]
+    pub remote: GatewayRemoteConfig,
+    #[serde(default)]
     pub allowlists: BTreeMap<String, Vec<String>>,
 }
 
@@ -353,6 +440,9 @@ impl Default for GatewayConfig {
             telegram_bot_token: String::new(),
             telegram_poll_interval_seconds: 5,
             tls: GatewayTlsConfig::default(),
+            web: GatewayWebConfig::default(),
+            auth: GatewayAuthConfig::default(),
+            remote: GatewayRemoteConfig::default(),
             allowlists,
         }
     }
@@ -378,6 +468,81 @@ pub struct GatewayTlsConfig {
     pub client_ca_file: String,
     #[serde(default)]
     pub rotate_on_start: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayWebConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_gateway_web_listen")]
+    pub listen_address: String,
+    #[serde(default = "default_gateway_web_ui_dir")]
+    pub ui_dir: String,
+    #[serde(default)]
+    pub cors_origin: String,
+}
+
+impl Default for GatewayWebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen_address: default_gateway_web_listen(),
+            ui_dir: default_gateway_web_ui_dir(),
+            cors_origin: String::new(),
+        }
+    }
+}
+
+fn default_gateway_web_listen() -> String {
+    "127.0.0.1:8088".to_owned()
+}
+
+fn default_gateway_web_ui_dir() -> String {
+    "ui/build/web".to_owned()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayAuthConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub password: String,
+}
+
+impl Default for GatewayAuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            token: String::new(),
+            password: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayRemoteConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_remote_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub public_base_url: String,
+}
+
+impl Default for GatewayRemoteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: default_remote_mode(),
+            public_base_url: String::new(),
+        }
+    }
+}
+
+fn default_remote_mode() -> String {
+    "disabled".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -876,6 +1041,135 @@ fn default_brain_stale_task_hours() -> i64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_session_reply_mode")]
+    pub default_reply_mode: String,
+    #[serde(default = "default_session_queue_mode")]
+    pub default_queue_mode: String,
+    #[serde(default = "default_sessions_prune_hours")]
+    pub prune_after_hours: u32,
+}
+
+impl Default for SessionsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_reply_mode: default_session_reply_mode(),
+            default_queue_mode: default_session_queue_mode(),
+            prune_after_hours: default_sessions_prune_hours(),
+        }
+    }
+}
+
+fn default_session_reply_mode() -> String {
+    "reply-back".to_owned()
+}
+
+fn default_session_queue_mode() -> String {
+    "connector".to_owned()
+}
+
+fn default_sessions_prune_hours() -> u32 {
+    24 * 14
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingConfig {
+    #[serde(default = "default_true")]
+    pub auto_pair_dm: bool,
+    #[serde(default = "default_true")]
+    pub mention_only_in_groups: bool,
+    #[serde(default = "default_routing_mentions")]
+    pub mention_names: Vec<String>,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            auto_pair_dm: true,
+            mention_only_in_groups: true,
+            mention_names: default_routing_mentions(),
+        }
+    }
+}
+
+fn default_routing_mentions() -> Vec<String> {
+    vec!["openpinch".to_owned()]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresenceConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub typing_events: bool,
+}
+
+impl Default for PresenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            typing_events: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_media_max_upload_bytes")]
+    pub max_upload_bytes: u64,
+    #[serde(default)]
+    pub temp_dir: String,
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_upload_bytes: default_media_max_upload_bytes(),
+            temp_dir: String::new(),
+        }
+    }
+}
+
+fn default_media_max_upload_bytes() -> u64 {
+    20 * 1024 * 1024
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub profile_dir: String,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            profile_dir: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorMemoryConfig {
     #[serde(default = "default_vector_backend")]
     pub requested_backend: String,
@@ -982,6 +1276,16 @@ pub struct ConnectorConfig {
     pub allowlist: Vec<String>,
     #[serde(default = "default_true")]
     pub api_first: bool,
+    #[serde(default)]
+    pub deferred: bool,
+    #[serde(default)]
+    pub auth_mode: String,
+    #[serde(default = "default_true")]
+    pub pair_dm: bool,
+    #[serde(default = "default_chunk_limit")]
+    pub chunk_limit: usize,
+    #[serde(default)]
+    pub mention_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1010,6 +1314,103 @@ pub struct ModelProviderConfig {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProfileConfig {
+    #[serde(default)]
+    pub provider_order: Vec<String>,
+    #[serde(default = "default_model_profile_mode")]
+    pub mode: String,
+    #[serde(default = "default_model_profile_timeout_seconds")]
+    pub timeout_seconds: u32,
+    #[serde(default = "default_model_profile_retry_budget")]
+    pub retry_budget: u32,
+    #[serde(default)]
+    pub hosted: bool,
+    #[serde(default)]
+    pub auth_mode: String,
+}
+
+impl Default for ModelProfileConfig {
+    fn default() -> Self {
+        Self {
+            provider_order: default_provider_order(),
+            mode: default_model_profile_mode(),
+            timeout_seconds: default_model_profile_timeout_seconds(),
+            retry_budget: default_model_profile_retry_budget(),
+            hosted: false,
+            auth_mode: String::new(),
+        }
+    }
+}
+
+fn default_model_profiles() -> BTreeMap<String, ModelProfileConfig> {
+    let mut profiles = BTreeMap::new();
+    profiles.insert(
+        "default".to_owned(),
+        ModelProfileConfig {
+            provider_order: default_provider_order(),
+            mode: "local-first".to_owned(),
+            timeout_seconds: default_model_profile_timeout_seconds(),
+            retry_budget: 2,
+            hosted: false,
+            auth_mode: String::new(),
+        },
+    );
+    profiles.insert(
+        "hosted-fallback".to_owned(),
+        ModelProfileConfig {
+            provider_order: default_provider_order(),
+            mode: "hybrid-failover".to_owned(),
+            timeout_seconds: 30,
+            retry_budget: 3,
+            hosted: true,
+            auth_mode: "api-key".to_owned(),
+        },
+    );
+    profiles
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelFailoverConfig {
+    #[serde(default = "default_model_profile_name")]
+    pub default_profile: String,
+    #[serde(default = "default_model_fallback_profile")]
+    pub fallback_profile: String,
+}
+
+impl Default for ModelFailoverConfig {
+    fn default() -> Self {
+        Self {
+            default_profile: default_model_profile_name(),
+            fallback_profile: default_model_fallback_profile(),
+        }
+    }
+}
+
+fn default_model_profile_name() -> String {
+    "default".to_owned()
+}
+
+fn default_model_fallback_profile() -> String {
+    "hosted-fallback".to_owned()
+}
+
+fn default_model_profile_mode() -> String {
+    "local-first".to_owned()
+}
+
+fn default_model_profile_timeout_seconds() -> u32 {
+    20
+}
+
+fn default_model_profile_retry_budget() -> u32 {
+    2
+}
+
+fn default_chunk_limit() -> usize {
+    1800
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1027,7 +1428,10 @@ mod tests {
         assert_eq!(config.brain.max_inline_suggestions, 2);
         assert_eq!(config.vector_memory.requested_backend, "lancedb");
         assert!(config.connectors.contains_key("telegram"));
+        assert!(config.connectors.contains_key("webchat"));
         assert!(config.connectors.contains_key("twilio-mms"));
+        assert!(config.gateway.web.enabled);
+        assert_eq!(config.model_failover.default_profile, "default");
     }
 
     #[test]
@@ -1045,10 +1449,18 @@ mod tests {
         config
             .set("brain.context_budget_chars", "4096")
             .expect("set brain field");
+        config
+            .set("gateway.web.enabled", "false")
+            .expect("set gateway web field");
+        config
+            .set("sessions.prune_after_hours", "24")
+            .expect("set session field");
 
         assert_eq!(config.models["ollama"].quantization, "Q8_0");
         assert!(!config.security.audit.enabled);
         assert_eq!(config.brain.context_budget_chars, 4096);
         assert_eq!(config.connectors["matrix"].mode, "bridge");
+        assert!(!config.gateway.web.enabled);
+        assert_eq!(config.sessions.prune_after_hours, 24);
     }
 }

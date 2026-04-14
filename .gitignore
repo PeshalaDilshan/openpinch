@@ -6,6 +6,8 @@ core/Cargo.lock
 core/target/
 gateway/bin/
 gateway/.cache/
+ui/.dart_tool/
+ui/build/
 *.log
 *.sqlite
 *.sqlite-shm

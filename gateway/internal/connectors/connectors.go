@@ -2,6 +2,7 @@ package connectors
 
 import (
 	"context"
+	"fmt"
 	"log"
 
 	"github.com/PeshalaDilshan/openpinch/gateway/internal/config"
@@ -22,6 +23,7 @@ type Connector interface {
 	Name() string
 	Enabled() bool
 	Start(context.Context) error
+	SendMessage(context.Context, string, string) error
 	Descriptor() Descriptor
 }
 
@@ -34,6 +36,7 @@ func NewRegistry(cfg *config.Config, bridge *enginebridge.Client) *Registry {
 	return &Registry{
 		connectors: []Connector{
 			NewTelegram(cfg, bridge),
+			NewWebChat(cfg),
 			newStub(cfg, "discord", "bot"),
 			newStub(cfg, "slack", "socket-mode"),
 			newStub(cfg, "whatsapp", "cloud-api"),
@@ -110,6 +113,18 @@ func (r *Registry) Status(name string) (Descriptor, bool) {
 	return Descriptor{}, false
 }
 
+func (r *Registry) SendMessage(ctx context.Context, name string, channelID string, text string) error {
+	for _, connector := range r.connectors {
+		if connector.Name() == name {
+			if !connector.Enabled() {
+				return fmt.Errorf("connector %s is disabled", name)
+			}
+			return connector.SendMessage(ctx, channelID, text)
+		}
+	}
+	return fmt.Errorf("connector %s not found", name)
+}
+
 type stub struct {
 	cfg  *config.Config
 	name string
@@ -147,6 +162,10 @@ func (s *stub) Descriptor() Descriptor {
 
 func (s *stub) Start(context.Context) error {
 	return nil
+}
+
+func (s *stub) SendMessage(context.Context, string, string) error {
+	return fmt.Errorf("connector %s is not implemented yet", s.name)
 }
 
 func healthFor(enabled bool, implemented bool) string {

@@ -1,5 +1,15 @@
-# UI Reserved
+# OpenPinch UI
 
-This directory is intentionally kept minimal until the Flutter UI lands.
+This directory contains the Flutter web control surface for OpenPinch.
 
-The CI workflow `.github/workflows/ci-flutter.yml` is already in place. It stays in placeholder mode until `ui/pubspec.yaml` exists, then it will run Flutter analyze, test, and build steps automatically.
+It targets the gateway HTTP API and event stream exposed by the Go server. A release build is emitted to `ui/build/web`, which the gateway serves when `gateway.web.enabled = true`.
+
+Local workflow:
+
+```bash
+cd ui
+flutter pub get
+flutter analyze
+flutter test
+flutter build web --release
+```
