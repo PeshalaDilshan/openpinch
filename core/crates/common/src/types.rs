@@ -151,6 +151,146 @@ pub struct MemoryQuery {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRecord {
+    pub id: String,
+    pub connector: String,
+    pub channel_id: String,
+    pub participant: String,
+    pub session_type: String,
+    pub title: String,
+    pub status: String,
+    pub reply_mode: String,
+    pub queue_mode: String,
+    pub model_profile: String,
+    pub mention_only: bool,
+    pub pending_pairing: bool,
+    pub last_message_preview: String,
+    pub message_count: u32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMessageRecord {
+    pub id: String,
+    pub session_id: String,
+    pub connector: String,
+    pub role: String,
+    pub sender: String,
+    pub body: String,
+    pub metadata_json: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionListQuery {
+    pub connector: Option<String>,
+    pub status: Option<String>,
+    pub include_archived: bool,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDetailQuery {
+    pub session_id: String,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDetail {
+    pub session: SessionRecord,
+    pub messages: Vec<SessionMessageRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionPruneRequestRecord {
+    pub older_than_hours: u32,
+    pub archive_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingRecord {
+    pub id: String,
+    pub connector: String,
+    pub channel_id: String,
+    pub sender: String,
+    pub session_id: String,
+    pub status: String,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingListQuery {
+    pub status: Option<String>,
+    pub connector: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingUpdate {
+    pub pairing_id: String,
+    pub action: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboundMessage {
+    pub connector: String,
+    pub channel_id: String,
+    pub sender: String,
+    pub body: String,
+    pub metadata_json: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboundMessageResult {
+    pub accepted: bool,
+    pub message_id: String,
+    pub session_id: String,
+    pub status: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoctorFinding {
+    pub id: String,
+    pub component: String,
+    pub severity: String,
+    pub status: String,
+    pub summary: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoctorReport {
+    pub status: String,
+    pub findings: Vec<DoctorFinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProfileRecord {
+    pub name: String,
+    pub provider_order: Vec<String>,
+    pub mode: String,
+    pub timeout_seconds: u32,
+    pub retry_budget: u32,
+    pub hosted: bool,
+    pub auth_mode: String,
+    pub default_profile: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiEventRecord {
+    pub id: String,
+    pub event_type: String,
+    pub payload_json: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrainRemember {
     pub kind: String,
     pub subtype: String,

@@ -18,6 +18,14 @@ service GatewayService {
   rpc ExportAudit(AuditExportRequest) returns (AuditExportResponse);
   rpc QueryMemory(MemoryQueryRequest) returns (MemoryQueryResponse);
   rpc UpsertMemory(MemoryUpsertRequest) returns (MemoryUpsertResponse);
+  rpc ListSessions(SessionListRequest) returns (SessionListResponse);
+  rpc GetSession(SessionRequest) returns (SessionResponse);
+  rpc PruneSessions(SessionPruneRequest) returns (SessionPruneResponse);
+  rpc ListPairings(PairingListRequest) returns (PairingListResponse);
+  rpc UpdatePairing(PairingUpdateRequest) returns (PairingUpdateResponse);
+  rpc SendChannelMessage(ChannelMessageRequest) returns (ChannelMessageResponse);
+  rpc GetDoctorReport(DoctorReportRequest) returns (DoctorReportResponse);
+  rpc ListModelProfiles(Empty) returns (ModelProfileListResponse);
   rpc RememberBrain(BrainRememberRequest) returns (BrainRememberResponse);
   rpc RecallBrain(BrainRecallRequest) returns (BrainRecallResponse);
   rpc SuggestBrain(BrainSuggestRequest) returns (BrainSuggestResponse);
@@ -27,6 +35,7 @@ service GatewayService {
   rpc RunAgentProtocol(AgentProtocolRequest) returns (AgentProtocolResponse);
   rpc QueueTask(QueueTaskRequest) returns (QueueTaskResponse);
   rpc GetPolicyReport(PolicyReportRequest) returns (PolicyReportResponse);
+  rpc StreamUiEvents(UiEventStreamRequest) returns (stream UiEvent);
 }
 
 service EngineRuntimeService {
@@ -36,6 +45,14 @@ service EngineRuntimeService {
   rpc Health(Empty) returns (HealthResponse);
   rpc QueryMemory(MemoryQueryRequest) returns (MemoryQueryResponse);
   rpc UpsertMemory(MemoryUpsertRequest) returns (MemoryUpsertResponse);
+  rpc ListSessions(SessionListRequest) returns (SessionListResponse);
+  rpc GetSession(SessionRequest) returns (SessionResponse);
+  rpc PruneSessions(SessionPruneRequest) returns (SessionPruneResponse);
+  rpc ListPairings(PairingListRequest) returns (PairingListResponse);
+  rpc UpdatePairing(PairingUpdateRequest) returns (PairingUpdateResponse);
+  rpc RecordOutboundMessage(ChannelMessageRequest) returns (ChannelMessageResponse);
+  rpc GetDoctorReport(DoctorReportRequest) returns (DoctorReportResponse);
+  rpc ListModelProfiles(Empty) returns (ModelProfileListResponse);
   rpc RememberBrain(BrainRememberRequest) returns (BrainRememberResponse);
   rpc RecallBrain(BrainRecallRequest) returns (BrainRecallResponse);
   rpc SuggestBrain(BrainSuggestRequest) returns (BrainSuggestResponse);
@@ -132,6 +149,9 @@ message SubmitMessageResponse {
   bool accepted = 1;
   string message_id = 2;
   string reply = 3;
+  string session_id = 4;
+  string pairing_id = 5;
+  string delivery_state = 6;
 }
 
 message ScheduleJobRequest {
@@ -262,6 +282,163 @@ message MemoryUpsertResponse {
   bool stored = 1;
   string backend = 2;
   string digest = 3;
+}
+
+message SessionRecord {
+  string id = 1;
+  string connector = 2;
+  string channel_id = 3;
+  string participant = 4;
+  string session_type = 5;
+  string title = 6;
+  string status = 7;
+  string reply_mode = 8;
+  string queue_mode = 9;
+  string model_profile = 10;
+  bool mention_only = 11;
+  bool pending_pairing = 12;
+  string last_message_preview = 13;
+  uint32 message_count = 14;
+  string created_at = 15;
+  string updated_at = 16;
+}
+
+message SessionMessage {
+  string id = 1;
+  string session_id = 2;
+  string connector = 3;
+  string role = 4;
+  string sender = 5;
+  string body = 6;
+  string metadata_json = 7;
+  string created_at = 8;
+}
+
+message SessionListRequest {
+  string connector = 1;
+  string status = 2;
+  bool include_archived = 3;
+  uint32 limit = 4;
+}
+
+message SessionListResponse {
+  string summary = 1;
+  repeated SessionRecord sessions = 2;
+}
+
+message SessionRequest {
+  string session_id = 1;
+  uint32 limit = 2;
+}
+
+message SessionResponse {
+  SessionRecord session = 1;
+  repeated SessionMessage messages = 2;
+}
+
+message SessionPruneRequest {
+  uint32 older_than_hours = 1;
+  bool archive_only = 2;
+}
+
+message SessionPruneResponse {
+  uint32 pruned = 1;
+}
+
+message PairingRecord {
+  string id = 1;
+  string connector = 2;
+  string channel_id = 3;
+  string sender = 4;
+  string session_id = 5;
+  string status = 6;
+  string reason = 7;
+  string created_at = 8;
+  string updated_at = 9;
+}
+
+message PairingListRequest {
+  string status = 1;
+  string connector = 2;
+  uint32 limit = 3;
+}
+
+message PairingListResponse {
+  repeated PairingRecord pairings = 1;
+}
+
+message PairingUpdateRequest {
+  string pairing_id = 1;
+  string action = 2;
+  string note = 3;
+}
+
+message PairingUpdateResponse {
+  bool updated = 1;
+  PairingRecord pairing = 2;
+}
+
+message ChannelMessageRequest {
+  string connector = 1;
+  string channel_id = 2;
+  string sender = 3;
+  string body = 4;
+  string metadata_json = 5;
+  string session_id = 6;
+}
+
+message ChannelMessageResponse {
+  bool accepted = 1;
+  string message_id = 2;
+  string session_id = 3;
+  string status = 4;
+  string detail = 5;
+}
+
+message DoctorReportRequest {
+  bool include_connectors = 1;
+  bool include_models = 2;
+  bool include_web = 3;
+}
+
+message DoctorFinding {
+  string id = 1;
+  string component = 2;
+  string severity = 3;
+  string status = 4;
+  string summary = 5;
+  string detail = 6;
+}
+
+message DoctorReportResponse {
+  string status = 1;
+  repeated DoctorFinding findings = 2;
+}
+
+message ModelProfile {
+  string name = 1;
+  repeated string provider_order = 2;
+  string mode = 3;
+  uint32 timeout_seconds = 4;
+  uint32 retry_budget = 5;
+  bool hosted = 6;
+  string auth_mode = 7;
+  bool default_profile = 8;
+}
+
+message ModelProfileListResponse {
+  repeated ModelProfile profiles = 1;
+}
+
+message UiEventStreamRequest {
+  string cursor = 1;
+}
+
+message UiEvent {
+  string id = 1;
+  string event_type = 2;
+  string payload_json = 3;
+  string created_at = 4;
 }
 
 message BrainRememberRequest {

@@ -45,9 +45,12 @@ type Message struct {
 }
 
 type MessageResult struct {
-	Accepted  bool
-	MessageID string
-	Reply     string
+	Accepted      bool
+	MessageID     string
+	Reply         string
+	SessionID     string
+	PairingID     string
+	DeliveryState string
 }
 
 type MemoryRecord struct {
@@ -57,6 +60,86 @@ type MemoryRecord struct {
 	MetadataJSON string
 	Score        float64
 	CreatedAt    string
+}
+
+type SessionRecord struct {
+	ID                 string
+	Connector          string
+	ChannelID          string
+	Participant        string
+	SessionType        string
+	Title              string
+	Status             string
+	ReplyMode          string
+	QueueMode          string
+	ModelProfile       string
+	MentionOnly        bool
+	PendingPairing     bool
+	LastMessagePreview string
+	MessageCount       uint32
+	CreatedAt          string
+	UpdatedAt          string
+}
+
+type SessionMessage struct {
+	ID           string
+	SessionID    string
+	Connector    string
+	Role         string
+	Sender       string
+	Body         string
+	MetadataJSON string
+	CreatedAt    string
+}
+
+type SessionDetail struct {
+	Session  *SessionRecord
+	Messages []SessionMessage
+}
+
+type PairingRecord struct {
+	ID        string
+	Connector string
+	ChannelID string
+	Sender    string
+	SessionID string
+	Status    string
+	Reason    string
+	CreatedAt string
+	UpdatedAt string
+}
+
+type OutboundMessageResult struct {
+	Accepted  bool
+	MessageID string
+	SessionID string
+	Status    string
+	Detail    string
+}
+
+type DoctorFinding struct {
+	ID        string
+	Component string
+	Severity  string
+	Status    string
+	Summary   string
+	Detail    string
+}
+
+type DoctorReport struct {
+	Status   string
+	Findings []DoctorFinding
+}
+
+type ModelProfile struct {
+	Name           string
+	ProviderOrder  []string
+	Mode           string
+	TimeoutSeconds uint32
+	RetryBudget    uint32
+	Hosted         bool
+	AuthMode       string
+	DefaultProfile bool
 }
 
 type BrainEntity struct {
@@ -283,9 +366,12 @@ func (c *Client) DeliverMessage(ctx context.Context, message Message) (*MessageR
 	}
 
 	return &MessageResult{
-		Accepted:  pb.GetBool(response.ProtoReflect(), "accepted"),
-		MessageID: pb.GetString(response.ProtoReflect(), "message_id"),
-		Reply:     pb.GetString(response.ProtoReflect(), "reply"),
+		Accepted:      pb.GetBool(response.ProtoReflect(), "accepted"),
+		MessageID:     pb.GetString(response.ProtoReflect(), "message_id"),
+		Reply:         pb.GetString(response.ProtoReflect(), "reply"),
+		SessionID:     pb.GetString(response.ProtoReflect(), "session_id"),
+		PairingID:     pb.GetString(response.ProtoReflect(), "pairing_id"),
+		DeliveryState: pb.GetString(response.ProtoReflect(), "delivery_state"),
 	}, nil
 }
 
@@ -347,6 +433,126 @@ func (c *Client) UpsertMemory(ctx context.Context, namespace string, key string,
 		return false, "", "", err
 	}
 	return pb.GetBool(response.ProtoReflect(), "stored"), pb.GetString(response.ProtoReflect(), "backend"), pb.GetString(response.ProtoReflect(), "digest"), nil
+}
+
+func (c *Client) ListSessions(ctx context.Context, connector string, status string, includeArchived bool, limit uint32) ([]SessionRecord, string, error) {
+	request := c.schema.NewMessage("openpinch.v1.SessionListRequest")
+	pb.SetString(request.ProtoReflect(), "connector", connector)
+	pb.SetString(request.ProtoReflect(), "status", status)
+	pb.SetBool(request.ProtoReflect(), "include_archived", includeArchived)
+	pb.SetUint32(request.ProtoReflect(), "limit", limit)
+
+	response := c.schema.NewMessage("openpinch.v1.SessionListResponse")
+	if err := c.invoke(ctx, "/openpinch.v1.EngineRuntimeService/ListSessions", request, response); err != nil {
+		return nil, "", err
+	}
+	return decodeSessions(response.ProtoReflect(), "sessions"), pb.GetString(response.ProtoReflect(), "summary"), nil
+}
+
+func (c *Client) GetSession(ctx context.Context, sessionID string, limit uint32) (*SessionDetail, error) {
+	request := c.schema.NewMessage("openpinch.v1.SessionRequest")
+	pb.SetString(request.ProtoReflect(), "session_id", sessionID)
+	pb.SetUint32(request.ProtoReflect(), "limit", limit)
+
+	response := c.schema.NewMessage("openpinch.v1.SessionResponse")
+	if err := c.invoke(ctx, "/openpinch.v1.EngineRuntimeService/GetSession", request, response); err != nil {
+		return nil, err
+	}
+	detail := &SessionDetail{}
+	if field := pb.FieldByName(response.ProtoReflect(), "session"); response.ProtoReflect().Has(field) {
+		detail.Session = decodeSessionRecord(response.ProtoReflect().Get(field).Message())
+	}
+	detail.Messages = decodeSessionMessages(response.ProtoReflect(), "messages")
+	return detail, nil
+}
+
+func (c *Client) PruneSessions(ctx context.Context, olderThanHours uint32, archiveOnly bool) (uint32, error) {
+	request := c.schema.NewMessage("openpinch.v1.SessionPruneRequest")
+	pb.SetUint32(request.ProtoReflect(), "older_than_hours", olderThanHours)
+	pb.SetBool(request.ProtoReflect(), "archive_only", archiveOnly)
+
+	response := c.schema.NewMessage("openpinch.v1.SessionPruneResponse")
+	if err := c.invoke(ctx, "/openpinch.v1.EngineRuntimeService/PruneSessions", request, response); err != nil {
+		return 0, err
+	}
+	return pb.GetUint32(response.ProtoReflect(), "pruned"), nil
+}
+
+func (c *Client) ListPairings(ctx context.Context, status string, connector string, limit uint32) ([]PairingRecord, error) {
+	request := c.schema.NewMessage("openpinch.v1.PairingListRequest")
+	pb.SetString(request.ProtoReflect(), "status", status)
+	pb.SetString(request.ProtoReflect(), "connector", connector)
+	pb.SetUint32(request.ProtoReflect(), "limit", limit)
+
+	response := c.schema.NewMessage("openpinch.v1.PairingListResponse")
+	if err := c.invoke(ctx, "/openpinch.v1.EngineRuntimeService/ListPairings", request, response); err != nil {
+		return nil, err
+	}
+	return decodePairings(response.ProtoReflect(), "pairings"), nil
+}
+
+func (c *Client) UpdatePairing(ctx context.Context, pairingID string, action string, note string) (*PairingRecord, error) {
+	request := c.schema.NewMessage("openpinch.v1.PairingUpdateRequest")
+	pb.SetString(request.ProtoReflect(), "pairing_id", pairingID)
+	pb.SetString(request.ProtoReflect(), "action", action)
+	pb.SetString(request.ProtoReflect(), "note", note)
+
+	response := c.schema.NewMessage("openpinch.v1.PairingUpdateResponse")
+	if err := c.invoke(ctx, "/openpinch.v1.EngineRuntimeService/UpdatePairing", request, response); err != nil {
+		return nil, err
+	}
+	field := pb.FieldByName(response.ProtoReflect(), "pairing")
+	if !response.ProtoReflect().Has(field) {
+		return nil, fmt.Errorf("pairing update response missing pairing")
+	}
+	return decodePairingRecord(response.ProtoReflect().Get(field).Message()), nil
+}
+
+func (c *Client) RecordOutboundMessage(ctx context.Context, connector string, channelID string, sender string, body string, metadataJSON string, sessionID string) (*OutboundMessageResult, error) {
+	request := c.schema.NewMessage("openpinch.v1.ChannelMessageRequest")
+	pb.SetString(request.ProtoReflect(), "connector", connector)
+	pb.SetString(request.ProtoReflect(), "channel_id", channelID)
+	pb.SetString(request.ProtoReflect(), "sender", sender)
+	pb.SetString(request.ProtoReflect(), "body", body)
+	pb.SetString(request.ProtoReflect(), "metadata_json", metadataJSON)
+	pb.SetString(request.ProtoReflect(), "session_id", sessionID)
+
+	response := c.schema.NewMessage("openpinch.v1.ChannelMessageResponse")
+	if err := c.invoke(ctx, "/openpinch.v1.EngineRuntimeService/RecordOutboundMessage", request, response); err != nil {
+		return nil, err
+	}
+	return &OutboundMessageResult{
+		Accepted:  pb.GetBool(response.ProtoReflect(), "accepted"),
+		MessageID: pb.GetString(response.ProtoReflect(), "message_id"),
+		SessionID: pb.GetString(response.ProtoReflect(), "session_id"),
+		Status:    pb.GetString(response.ProtoReflect(), "status"),
+		Detail:    pb.GetString(response.ProtoReflect(), "detail"),
+	}, nil
+}
+
+func (c *Client) GetDoctorReport(ctx context.Context, includeConnectors bool, includeModels bool, includeWeb bool) (*DoctorReport, error) {
+	request := c.schema.NewMessage("openpinch.v1.DoctorReportRequest")
+	pb.SetBool(request.ProtoReflect(), "include_connectors", includeConnectors)
+	pb.SetBool(request.ProtoReflect(), "include_models", includeModels)
+	pb.SetBool(request.ProtoReflect(), "include_web", includeWeb)
+
+	response := c.schema.NewMessage("openpinch.v1.DoctorReportResponse")
+	if err := c.invoke(ctx, "/openpinch.v1.EngineRuntimeService/GetDoctorReport", request, response); err != nil {
+		return nil, err
+	}
+	return &DoctorReport{
+		Status:   pb.GetString(response.ProtoReflect(), "status"),
+		Findings: decodeDoctorFindings(response.ProtoReflect(), "findings"),
+	}, nil
+}
+
+func (c *Client) ListModelProfiles(ctx context.Context) ([]ModelProfile, error) {
+	request := c.schema.NewMessage("openpinch.v1.Empty")
+	response := c.schema.NewMessage("openpinch.v1.ModelProfileListResponse")
+	if err := c.invoke(ctx, "/openpinch.v1.EngineRuntimeService/ListModelProfiles", request, response); err != nil {
+		return nil, err
+	}
+	return decodeModelProfiles(response.ProtoReflect(), "profiles"), nil
 }
 
 func (c *Client) RememberBrain(ctx context.Context, kind string, subtype string, title string, content string, importance float64, scopeJSON string, linksJSON string, sourceRef string) (*BrainRememberResult, error) {
@@ -636,6 +842,78 @@ func stringMap(message protoreflect.Message, name string) map[string]string {
 	return values
 }
 
+func decodeSessionRecord(message protoreflect.Message) *SessionRecord {
+	return &SessionRecord{
+		ID:                 pb.GetString(message, "id"),
+		Connector:          pb.GetString(message, "connector"),
+		ChannelID:          pb.GetString(message, "channel_id"),
+		Participant:        pb.GetString(message, "participant"),
+		SessionType:        pb.GetString(message, "session_type"),
+		Title:              pb.GetString(message, "title"),
+		Status:             pb.GetString(message, "status"),
+		ReplyMode:          pb.GetString(message, "reply_mode"),
+		QueueMode:          pb.GetString(message, "queue_mode"),
+		ModelProfile:       pb.GetString(message, "model_profile"),
+		MentionOnly:        pb.GetBool(message, "mention_only"),
+		PendingPairing:     pb.GetBool(message, "pending_pairing"),
+		LastMessagePreview: pb.GetString(message, "last_message_preview"),
+		MessageCount:       pb.GetUint32(message, "message_count"),
+		CreatedAt:          pb.GetString(message, "created_at"),
+		UpdatedAt:          pb.GetString(message, "updated_at"),
+	}
+}
+
+func decodeSessionMessage(message protoreflect.Message) SessionMessage {
+	return SessionMessage{
+		ID:           pb.GetString(message, "id"),
+		SessionID:    pb.GetString(message, "session_id"),
+		Connector:    pb.GetString(message, "connector"),
+		Role:         pb.GetString(message, "role"),
+		Sender:       pb.GetString(message, "sender"),
+		Body:         pb.GetString(message, "body"),
+		MetadataJSON: pb.GetString(message, "metadata_json"),
+		CreatedAt:    pb.GetString(message, "created_at"),
+	}
+}
+
+func decodePairingRecord(message protoreflect.Message) *PairingRecord {
+	return &PairingRecord{
+		ID:        pb.GetString(message, "id"),
+		Connector: pb.GetString(message, "connector"),
+		ChannelID: pb.GetString(message, "channel_id"),
+		Sender:    pb.GetString(message, "sender"),
+		SessionID: pb.GetString(message, "session_id"),
+		Status:    pb.GetString(message, "status"),
+		Reason:    pb.GetString(message, "reason"),
+		CreatedAt: pb.GetString(message, "created_at"),
+		UpdatedAt: pb.GetString(message, "updated_at"),
+	}
+}
+
+func decodeDoctorFinding(message protoreflect.Message) DoctorFinding {
+	return DoctorFinding{
+		ID:        pb.GetString(message, "id"),
+		Component: pb.GetString(message, "component"),
+		Severity:  pb.GetString(message, "severity"),
+		Status:    pb.GetString(message, "status"),
+		Summary:   pb.GetString(message, "summary"),
+		Detail:    pb.GetString(message, "detail"),
+	}
+}
+
+func decodeModelProfile(message protoreflect.Message) ModelProfile {
+	return ModelProfile{
+		Name:           pb.GetString(message, "name"),
+		ProviderOrder:  repeatedStrings(message, "provider_order"),
+		Mode:           pb.GetString(message, "mode"),
+		TimeoutSeconds: pb.GetUint32(message, "timeout_seconds"),
+		RetryBudget:    pb.GetUint32(message, "retry_budget"),
+		Hosted:         pb.GetBool(message, "hosted"),
+		AuthMode:       pb.GetString(message, "auth_mode"),
+		DefaultProfile: pb.GetBool(message, "default_profile"),
+	}
+}
+
 func decodeBrainEntity(message protoreflect.Message) *BrainEntity {
 	return &BrainEntity{
 		ID:         pb.GetString(message, "id"),
@@ -755,6 +1033,56 @@ func decodeBrainSuggestions(message protoreflect.Message, name string) []BrainSu
 	values := make([]BrainSuggestion, 0, list.Len())
 	for i := 0; i < list.Len(); i++ {
 		values = append(values, decodeBrainSuggestion(list.Get(i).Message()))
+	}
+	return values
+}
+
+func decodeSessions(message protoreflect.Message, name string) []SessionRecord {
+	field := pb.FieldByName(message, name)
+	list := message.Get(field).List()
+	values := make([]SessionRecord, 0, list.Len())
+	for i := 0; i < list.Len(); i++ {
+		values = append(values, *decodeSessionRecord(list.Get(i).Message()))
+	}
+	return values
+}
+
+func decodeSessionMessages(message protoreflect.Message, name string) []SessionMessage {
+	field := pb.FieldByName(message, name)
+	list := message.Get(field).List()
+	values := make([]SessionMessage, 0, list.Len())
+	for i := 0; i < list.Len(); i++ {
+		values = append(values, decodeSessionMessage(list.Get(i).Message()))
+	}
+	return values
+}
+
+func decodePairings(message protoreflect.Message, name string) []PairingRecord {
+	field := pb.FieldByName(message, name)
+	list := message.Get(field).List()
+	values := make([]PairingRecord, 0, list.Len())
+	for i := 0; i < list.Len(); i++ {
+		values = append(values, *decodePairingRecord(list.Get(i).Message()))
+	}
+	return values
+}
+
+func decodeDoctorFindings(message protoreflect.Message, name string) []DoctorFinding {
+	field := pb.FieldByName(message, name)
+	list := message.Get(field).List()
+	values := make([]DoctorFinding, 0, list.Len())
+	for i := 0; i < list.Len(); i++ {
+		values = append(values, decodeDoctorFinding(list.Get(i).Message()))
+	}
+	return values
+}
+
+func decodeModelProfiles(message protoreflect.Message, name string) []ModelProfile {
+	field := pb.FieldByName(message, name)
+	list := message.Get(field).List()
+	values := make([]ModelProfile, 0, list.Len())
+	for i := 0; i < list.Len(); i++ {
+		values = append(values, decodeModelProfile(list.Get(i).Message()))
 	}
 	return values
 }

@@ -18,7 +18,8 @@ The stack is split deliberately:
 - Async task queue with interactive, connector, autonomy, and background priorities
 - Encrypted vector-memory fallback backed by SQLite with a LanceDB-oriented config surface
 - Signed skills registry with Ed25519 verification
-- Gateway-first messaging architecture with a 20+ connector catalog and Telegram implemented end to end
+- Gateway-first messaging architecture with a 20+ connector catalog, Telegram end to end, and local WebChat over HTTP/SSE
+- Browser-facing control surface served by the gateway with sessions, pairings, doctor, model profiles, and webchat views
 - Zero-trust gateway options: mTLS, per-channel allowlists, attestation reporting, audit export
 - Formal protocol spec support for multi-agent handoff flows
 - Structured logging, local SQLite state, graceful shutdown, and deterministic setup scripts
@@ -40,7 +41,7 @@ The stack is split deliberately:
 ├── skills/               # trust roots, registry, example skills
 ├── docs/                 # architecture, setup, sandbox, skills
 ├── scripts/              # bootstrap and helper scripts
-└── ui/                   # reserved for future Flutter UI
+└── ui/                   # Flutter web control surface
 ```
 
 ## Quick Start

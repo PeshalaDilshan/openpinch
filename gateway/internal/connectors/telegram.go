@@ -141,6 +141,14 @@ func (t *TelegramConnector) sendMessage(ctx context.Context, chatID int64, text 
 	return nil
 }
 
+func (t *TelegramConnector) SendMessage(ctx context.Context, channelID string, text string) error {
+	chatID, err := strconv.ParseInt(channelID, 10, 64)
+	if err != nil {
+		return err
+	}
+	return t.sendMessage(ctx, chatID, text)
+}
+
 type telegramUpdatesResponse struct {
 	Result []telegramUpdate `json:"result"`
 }

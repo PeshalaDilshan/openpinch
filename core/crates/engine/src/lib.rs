@@ -12,20 +12,29 @@ use openpinch_common::openpinch::{
     BrainForgetRequest, BrainForgetResponse, BrainRecallRequest, BrainRecallResponse,
     BrainRelation, BrainRememberRequest, BrainRememberResponse, BrainSuggestRequest,
     BrainSuggestResponse, BrainSuggestion, BrainTask, BrainTaskListRequest, BrainTaskListResponse,
-    BrainTaskUpdateRequest, BrainTaskUpdateResponse, Empty, EngineMessageRequest,
-    EngineSkillRequest, EngineToolRequest, ExecuteResponse, HealthResponse, MemoryQueryRequest,
-    MemoryQueryResponse, MemoryRecord as ProtoMemoryRecord, MemoryUpsertRequest,
-    MemoryUpsertResponse, PolicyReportRequest, PolicyReportResponse, QueueTaskRequest,
-    QueueTaskResponse, StatusResponse, SubmitMessageResponse,
+    BrainTaskUpdateRequest, BrainTaskUpdateResponse, ChannelMessageRequest, ChannelMessageResponse,
+    DoctorFinding as ProtoDoctorFinding, DoctorReportRequest, DoctorReportResponse, Empty,
+    EngineMessageRequest, EngineSkillRequest, EngineToolRequest, ExecuteResponse, HealthResponse,
+    MemoryQueryRequest, MemoryQueryResponse, MemoryRecord as ProtoMemoryRecord,
+    MemoryUpsertRequest, MemoryUpsertResponse, ModelProfile, ModelProfileListResponse,
+    PairingListRequest, PairingListResponse, PairingRecord as ProtoPairingRecord,
+    PairingUpdateRequest, PairingUpdateResponse, PolicyReportRequest, PolicyReportResponse,
+    QueueTaskRequest, QueueTaskResponse, SessionListRequest, SessionListResponse,
+    SessionMessage as ProtoSessionMessage, SessionPruneRequest, SessionPruneResponse,
+    SessionRecord as ProtoSessionRecord, SessionRequest, SessionResponse, StatusResponse,
+    SubmitMessageResponse,
 };
 use openpinch_common::{
     AppConfig, AttestationReport, AuditEvent, BrainConfig, BrainEntityRecord, BrainFactRecord,
     BrainForget, BrainForgetResult, BrainRecallQuery, BrainRecallResult, BrainRelationRecord,
     BrainRemember, BrainRememberResult, BrainSuggestQuery, BrainSuggestResult,
     BrainSuggestionRecord, BrainTaskListQuery, BrainTaskListResult, BrainTaskRecord,
-    BrainTaskUpdate, EncryptedBlob, MemoryQuery, MemoryRecord, MessageEnvelope, OpenPinchPaths,
-    PolicyReport, ProtocolRunRequest, ProtocolRunResult, QueuePriority, QueueReceipt, QueueTask,
-    RoleBinding, RuntimeStatus, ScheduleRequest, SessionIdentity, SessionKeypair, ToolCall,
+    BrainTaskUpdate, DoctorFinding, DoctorReport, EncryptedBlob, MemoryQuery, MemoryRecord,
+    MessageEnvelope, ModelProfileRecord, OpenPinchPaths, OutboundMessage, OutboundMessageResult,
+    PairingListQuery, PairingRecord, PairingUpdate, PolicyReport, ProtocolRunRequest,
+    ProtocolRunResult, QueuePriority, QueueReceipt, QueueTask, RoleBinding, RuntimeStatus,
+    ScheduleRequest, SessionDetail, SessionDetailQuery, SessionIdentity, SessionKeypair,
+    SessionListQuery, SessionMessageRecord, SessionPruneRequestRecord, SessionRecord, ToolCall,
     ToolOutcome, decrypt_bytes, derive_key_from_material, encrypt_bytes,
 };
 use openpinch_sandbox::SandboxManager;
@@ -78,6 +87,15 @@ pub struct EngineHandle {
     pub endpoint: String,
     join: JoinHandle<Result<()>>,
     shutdown: CancellationToken,
+}
+
+struct InboundMessageResult {
+    accepted: bool,
+    message_id: String,
+    session_id: String,
+    pairing_id: String,
+    delivery_state: String,
+    reply: String,
 }
 
 impl EngineRuntime {
@@ -195,32 +213,80 @@ impl EngineRuntime {
             .await
     }
 
-    pub async fn handle_message(&self, message: MessageEnvelope) -> Result<String> {
+    pub(crate) async fn handle_message(
+        &self,
+        message: MessageEnvelope,
+    ) -> Result<InboundMessageResult> {
         self.inner.state.record_message(&message)?;
+        let session = self.resolve_session(&message)?;
+        let message_id = self.inner.state.record_session_message(
+            &session.id,
+            &message.connector,
+            "user",
+            &message.sender,
+            &message.body,
+            &message.metadata_json,
+        )?;
         let _ = self.inner.brain.ingest_message(&message);
+
+        if let Some(pairing_id) = self.ensure_pairing_if_required(&session, &message)? {
+            self.record_audit(
+                "connector.pairing",
+                "info",
+                "pairing required before message delivery",
+                0.12,
+                json!({
+                    "connector": message.connector,
+                    "sender": message.sender,
+                    "session_id": session.id,
+                    "pairing_id": pairing_id,
+                })
+                .to_string(),
+            )?;
+            return Ok(InboundMessageResult {
+                accepted: true,
+                message_id,
+                session_id: session.id,
+                pairing_id,
+                delivery_state: "pairing_required".to_owned(),
+                reply: "Pairing request created. Approve it from the Control UI or `openpinch pairing approve <id>` before OpenPinch starts replying in this session.".to_owned(),
+            });
+        }
+
+        if self.should_ignore_message(&session, &message) {
+            return Ok(InboundMessageResult {
+                accepted: true,
+                message_id,
+                session_id: session.id,
+                pairing_id: String::new(),
+                delivery_state: "ignored".to_owned(),
+                reply: String::new(),
+            });
+        }
+
         let scope_json = self.inner.brain.scope_for_message(&message);
         let context_pack = self
             .inner
             .brain
             .build_context_pack(&message.body, &scope_json)
             .unwrap_or_default();
-
         let prompt = if context_pack.is_empty() {
             format!(
-                "You are OpenPinch, a local autonomous agent. Connector: {}. Sender: {}. Message: {}",
-                message.connector, message.sender, message.body
+                "You are OpenPinch, a local autonomous agent. Connector: {}. Sender: {}. Session: {}. Message: {}",
+                message.connector, message.sender, session.id, message.body
             )
         } else {
             format!(
-                "You are OpenPinch, a local autonomous agent.\nConnector: {}\nSender: {}\nRelevant brain context:\n{}\nUser message: {}",
-                message.connector, message.sender, context_pack, message.body
+                "You are OpenPinch, a local autonomous agent.\nConnector: {}\nSender: {}\nSession: {}\nRelevant brain context:\n{}\nUser message: {}",
+                message.connector, message.sender, session.id, context_pack, message.body
             )
         };
 
+        let route = self.model_route_for_session(&session);
         match self
             .inner
             .orchestrator
-            .generate(&prompt, QueuePriority::Connector)
+            .generate_with_route(&prompt, QueuePriority::Connector, &route)
             .await
         {
             Ok(result) => {
@@ -247,6 +313,18 @@ impl EngineRuntime {
                         reply = format!("{reply}\n\nNext actions:\n{suffix}");
                     }
                 }
+                self.inner.state.record_session_message(
+                    &session.id,
+                    &message.connector,
+                    "assistant",
+                    "openpinch",
+                    &reply,
+                    &json!({
+                        "provider": result.provider,
+                        "cache": result.cache_tier,
+                    })
+                    .to_string(),
+                )?;
                 self.record_audit(
                     "connector.message",
                     "info",
@@ -256,10 +334,18 @@ impl EngineRuntime {
                         "connector": message.connector,
                         "provider": result.provider,
                         "cache": result.cache_tier,
+                        "session_id": session.id,
                     })
                     .to_string(),
                 )?;
-                Ok(reply)
+                Ok(InboundMessageResult {
+                    accepted: true,
+                    message_id,
+                    session_id: session.id,
+                    pairing_id: String::new(),
+                    delivery_state: "replied".to_owned(),
+                    reply,
+                })
             }
             Err(error) => {
                 self.record_audit(
@@ -267,11 +353,19 @@ impl EngineRuntime {
                     "warning",
                     "message handled without local model reply",
                     0.45,
-                    serde_json::json!({ "error": error.to_string() }).to_string(),
+                    serde_json::json!({ "error": error.to_string(), "session_id": session.id })
+                        .to_string(),
                 )?;
-                Ok(format!(
-                    "OpenPinch received the message but no local model backend produced a reply: {error}"
-                ))
+                Ok(InboundMessageResult {
+                    accepted: true,
+                    message_id,
+                    session_id: session.id,
+                    pairing_id: String::new(),
+                    delivery_state: "degraded".to_owned(),
+                    reply: format!(
+                        "OpenPinch received the message but no local model backend produced a reply: {error}"
+                    ),
+                })
             }
         }
     }
@@ -405,6 +499,202 @@ impl EngineRuntime {
         Ok(digest)
     }
 
+    pub fn list_sessions(&self, query: SessionListQuery) -> Result<Vec<SessionRecord>> {
+        self.inner.state.list_sessions(query)
+    }
+
+    pub fn get_session(&self, query: SessionDetailQuery) -> Result<SessionDetail> {
+        self.inner.state.get_session_detail(query)
+    }
+
+    pub fn prune_sessions(&self, request: SessionPruneRequestRecord) -> Result<u32> {
+        self.inner.state.prune_sessions(request)
+    }
+
+    pub fn list_pairings(&self, query: PairingListQuery) -> Result<Vec<PairingRecord>> {
+        self.inner.state.list_pairings(query)
+    }
+
+    pub fn update_pairing(&self, request: PairingUpdate) -> Result<PairingRecord> {
+        let pairing = self.inner.state.update_pairing(request)?;
+        self.record_audit(
+            "connector.pairing",
+            "info",
+            "pairing updated",
+            0.06,
+            json!({ "pairing_id": pairing.id, "status": pairing.status }).to_string(),
+        )?;
+        Ok(pairing)
+    }
+
+    pub fn record_outbound_message(
+        &self,
+        request: OutboundMessage,
+    ) -> Result<OutboundMessageResult> {
+        let session = if request.session_id.is_empty() {
+            self.inner.state.resolve_session_for_outbound(
+                &request.connector,
+                &request.channel_id,
+                &request.sender,
+                &self.inner.config,
+            )?
+        } else {
+            self.inner.state.session_by_id(&request.session_id)?
+        };
+        let message_id = self.inner.state.record_session_message(
+            &session.id,
+            &request.connector,
+            "assistant",
+            if request.sender.is_empty() {
+                "openpinch"
+            } else {
+                &request.sender
+            },
+            &request.body,
+            &request.metadata_json,
+        )?;
+        Ok(OutboundMessageResult {
+            accepted: true,
+            message_id,
+            session_id: session.id,
+            status: "sent".to_owned(),
+            detail: "outbound message recorded".to_owned(),
+        })
+    }
+
+    pub async fn doctor_report(
+        &self,
+        include_connectors: bool,
+        include_models: bool,
+        include_web: bool,
+    ) -> Result<DoctorReport> {
+        let mut findings = Vec::new();
+        let health = self.inner.tools.health().await;
+        if health.missing_prerequisites.is_empty() {
+            findings.push(DoctorFinding {
+                id: "sandbox-ready".to_owned(),
+                component: "sandbox".to_owned(),
+                severity: "info".to_owned(),
+                status: "ready".to_owned(),
+                summary: "sandbox prerequisites are satisfied".to_owned(),
+                detail: health.backend.clone(),
+            });
+        } else {
+            for (index, missing) in health.missing_prerequisites.iter().enumerate() {
+                findings.push(DoctorFinding {
+                    id: format!("sandbox-{index}"),
+                    component: "sandbox".to_owned(),
+                    severity: "warning".to_owned(),
+                    status: "degraded".to_owned(),
+                    summary: "sandbox prerequisite missing".to_owned(),
+                    detail: missing.clone(),
+                });
+            }
+        }
+
+        if include_models {
+            for profile in self.model_profiles() {
+                findings.push(DoctorFinding {
+                    id: format!("model-profile-{}", profile.name),
+                    component: "models".to_owned(),
+                    severity: if profile.provider_order.is_empty() {
+                        "warning".to_owned()
+                    } else {
+                        "info".to_owned()
+                    },
+                    status: if profile.provider_order.is_empty() {
+                        "degraded".to_owned()
+                    } else {
+                        "configured".to_owned()
+                    },
+                    summary: format!("model profile {}", profile.name),
+                    detail: format!(
+                        "mode={} providers={}",
+                        profile.mode,
+                        profile.provider_order.join(", ")
+                    ),
+                });
+            }
+        }
+
+        if include_connectors {
+            for (name, connector) in &self.inner.config.connectors {
+                findings.push(DoctorFinding {
+                    id: format!("connector-{name}"),
+                    component: "connectors".to_owned(),
+                    severity: if connector.enabled && connector.deferred {
+                        "warning".to_owned()
+                    } else {
+                        "info".to_owned()
+                    },
+                    status: if connector.enabled {
+                        if connector.deferred {
+                            "deferred".to_owned()
+                        } else {
+                            "enabled".to_owned()
+                        }
+                    } else {
+                        "disabled".to_owned()
+                    },
+                    summary: format!("connector {name}"),
+                    detail: format!(
+                        "mode={} auth={} pair_dm={}",
+                        connector.mode, connector.auth_mode, connector.pair_dm
+                    ),
+                });
+            }
+        }
+
+        if include_web {
+            findings.push(DoctorFinding {
+                id: "gateway-web".to_owned(),
+                component: "gateway.web".to_owned(),
+                severity: if self.inner.config.gateway.web.enabled {
+                    "info".to_owned()
+                } else {
+                    "warning".to_owned()
+                },
+                status: if self.inner.config.gateway.web.enabled {
+                    "enabled".to_owned()
+                } else {
+                    "disabled".to_owned()
+                },
+                summary: "web control surface".to_owned(),
+                detail: format!(
+                    "listen={} ui_dir={} remote_mode={}",
+                    self.inner.config.gateway.web.listen_address,
+                    self.inner.config.gateway.web.ui_dir,
+                    self.inner.config.gateway.remote.mode
+                ),
+            });
+        }
+
+        let status = if findings.iter().any(|finding| finding.severity == "warning") {
+            "degraded".to_owned()
+        } else {
+            "ready".to_owned()
+        };
+        Ok(DoctorReport { status, findings })
+    }
+
+    pub fn model_profiles(&self) -> Vec<ModelProfileRecord> {
+        self.inner
+            .config
+            .model_profiles
+            .iter()
+            .map(|(name, profile)| ModelProfileRecord {
+                name: name.clone(),
+                provider_order: profile.provider_order.clone(),
+                mode: profile.mode.clone(),
+                timeout_seconds: profile.timeout_seconds,
+                retry_budget: profile.retry_budget,
+                hosted: profile.hosted,
+                auth_mode: profile.auth_mode.clone(),
+                default_profile: *name == self.inner.config.model_failover.default_profile,
+            })
+            .collect()
+    }
+
     pub fn remember_brain(&self, request: BrainRemember) -> Result<BrainRememberResult> {
         let result = self.inner.brain.remember(request)?;
         self.record_audit(
@@ -534,6 +824,119 @@ impl EngineRuntime {
         }
     }
 
+    fn resolve_session(&self, message: &MessageEnvelope) -> Result<SessionRecord> {
+        self.inner.state.resolve_session_for_inbound(
+            message,
+            &self.inner.config,
+            &self.inner.config.model_failover.default_profile,
+        )
+    }
+
+    fn ensure_pairing_if_required(
+        &self,
+        session: &SessionRecord,
+        message: &MessageEnvelope,
+    ) -> Result<Option<String>> {
+        if message.connector == "webchat" {
+            return Ok(None);
+        }
+        let session_is_direct = session.session_type == "direct";
+        let connector = self
+            .inner
+            .config
+            .connectors
+            .get(&message.connector)
+            .cloned()
+            .unwrap_or_default();
+        if !session_is_direct || !self.inner.config.routing.auto_pair_dm || !connector.pair_dm {
+            return Ok(None);
+        }
+        if connector
+            .allowlist
+            .iter()
+            .any(|entry| entry == &message.sender)
+        {
+            self.inner
+                .state
+                .clear_session_pending_pairing(&session.id)?;
+            return Ok(None);
+        }
+        if self.inner.state.pairing_is_approved(
+            &message.connector,
+            &message.channel_id,
+            &message.sender,
+        )? {
+            self.inner
+                .state
+                .clear_session_pending_pairing(&session.id)?;
+            return Ok(None);
+        }
+        let pairing = self.inner.state.ensure_pairing(
+            &message.connector,
+            &message.channel_id,
+            &message.sender,
+            &session.id,
+            "direct message not yet paired",
+        )?;
+        self.inner
+            .state
+            .set_session_pending_pairing(&session.id, true)?;
+        Ok(Some(pairing.id))
+    }
+
+    fn should_ignore_message(&self, session: &SessionRecord, message: &MessageEnvelope) -> bool {
+        if session.session_type != "group" {
+            return false;
+        }
+        let connector = self
+            .inner
+            .config
+            .connectors
+            .get(&message.connector)
+            .cloned()
+            .unwrap_or_default();
+        if !self.inner.config.routing.mention_only_in_groups && !connector.mention_only {
+            return false;
+        }
+        if let Ok(metadata) = serde_json::from_str::<Value>(&message.metadata_json) {
+            if metadata
+                .get("reply_to_openpinch")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return false;
+            }
+        }
+        let lowered = message.body.to_lowercase();
+        !self
+            .inner
+            .config
+            .routing
+            .mention_names
+            .iter()
+            .any(|name| lowered.contains(&name.to_lowercase()))
+    }
+
+    fn model_route_for_session(&self, session: &SessionRecord) -> Vec<String> {
+        let name = if session.model_profile.is_empty() {
+            self.inner.config.model_failover.default_profile.as_str()
+        } else {
+            session.model_profile.as_str()
+        };
+        self.inner
+            .config
+            .model_profiles
+            .get(name)
+            .map(|profile| {
+                if profile.provider_order.is_empty() {
+                    self.inner.config.orchestration.provider_order.clone()
+                } else {
+                    profile.provider_order.clone()
+                }
+            })
+            .unwrap_or_else(|| self.inner.config.orchestration.provider_order.clone())
+    }
+
     fn record_audit(
         &self,
         category: &str,
@@ -583,16 +986,19 @@ impl EngineRuntimeService for RuntimeRpcService {
             body: message.body,
             metadata_json: message.metadata_json,
         };
-        let reply = self
+        let result = self
             .engine
             .handle_message(envelope)
             .await
             .map_err(internal_status)?;
 
         Ok(Response::new(SubmitMessageResponse {
-            accepted: true,
-            message_id: format!("msg-{}", Utc::now().timestamp_millis()),
-            reply,
+            accepted: result.accepted,
+            message_id: result.message_id,
+            reply: result.reply,
+            session_id: result.session_id,
+            pairing_id: result.pairing_id,
+            delivery_state: result.delivery_state,
         }))
     }
 
@@ -676,6 +1082,179 @@ impl EngineRuntimeService for RuntimeRpcService {
             stored: true,
             backend: self.engine.inner.orchestrator.vector_backend().to_owned(),
             digest,
+        }))
+    }
+
+    async fn list_sessions(
+        &self,
+        request: Request<SessionListRequest>,
+    ) -> Result<Response<SessionListResponse>, Status> {
+        let request = request.into_inner();
+        let sessions = self
+            .engine
+            .list_sessions(SessionListQuery {
+                connector: if request.connector.is_empty() {
+                    None
+                } else {
+                    Some(request.connector)
+                },
+                status: if request.status.is_empty() {
+                    None
+                } else {
+                    Some(request.status)
+                },
+                include_archived: request.include_archived,
+                limit: request.limit.max(1) as usize,
+            })
+            .map_err(internal_status)?;
+        Ok(Response::new(SessionListResponse {
+            summary: format!("{} sessions", sessions.len()),
+            sessions: sessions.into_iter().map(proto_session_record).collect(),
+        }))
+    }
+
+    async fn get_session(
+        &self,
+        request: Request<SessionRequest>,
+    ) -> Result<Response<SessionResponse>, Status> {
+        let request = request.into_inner();
+        let detail = self
+            .engine
+            .get_session(SessionDetailQuery {
+                session_id: request.session_id,
+                limit: request.limit.max(1) as usize,
+            })
+            .map_err(internal_status)?;
+        Ok(Response::new(SessionResponse {
+            session: Some(proto_session_record(detail.session)),
+            messages: detail
+                .messages
+                .into_iter()
+                .map(proto_session_message)
+                .collect(),
+        }))
+    }
+
+    async fn prune_sessions(
+        &self,
+        request: Request<SessionPruneRequest>,
+    ) -> Result<Response<SessionPruneResponse>, Status> {
+        let request = request.into_inner();
+        let pruned = self
+            .engine
+            .prune_sessions(SessionPruneRequestRecord {
+                older_than_hours: request.older_than_hours.max(1),
+                archive_only: request.archive_only,
+            })
+            .map_err(internal_status)?;
+        Ok(Response::new(SessionPruneResponse { pruned }))
+    }
+
+    async fn list_pairings(
+        &self,
+        request: Request<PairingListRequest>,
+    ) -> Result<Response<PairingListResponse>, Status> {
+        let request = request.into_inner();
+        let pairings = self
+            .engine
+            .list_pairings(PairingListQuery {
+                status: if request.status.is_empty() {
+                    None
+                } else {
+                    Some(request.status)
+                },
+                connector: if request.connector.is_empty() {
+                    None
+                } else {
+                    Some(request.connector)
+                },
+                limit: request.limit.max(1) as usize,
+            })
+            .map_err(internal_status)?;
+        Ok(Response::new(PairingListResponse {
+            pairings: pairings.into_iter().map(proto_pairing_record).collect(),
+        }))
+    }
+
+    async fn update_pairing(
+        &self,
+        request: Request<PairingUpdateRequest>,
+    ) -> Result<Response<PairingUpdateResponse>, Status> {
+        let request = request.into_inner();
+        let pairing = self
+            .engine
+            .update_pairing(PairingUpdate {
+                pairing_id: request.pairing_id,
+                action: request.action,
+                note: request.note,
+            })
+            .map_err(internal_status)?;
+        Ok(Response::new(PairingUpdateResponse {
+            updated: true,
+            pairing: Some(proto_pairing_record(pairing)),
+        }))
+    }
+
+    async fn record_outbound_message(
+        &self,
+        request: Request<ChannelMessageRequest>,
+    ) -> Result<Response<ChannelMessageResponse>, Status> {
+        let request = request.into_inner();
+        let result = self
+            .engine
+            .record_outbound_message(OutboundMessage {
+                connector: request.connector,
+                channel_id: request.channel_id,
+                sender: request.sender,
+                body: request.body,
+                metadata_json: request.metadata_json,
+                session_id: request.session_id,
+            })
+            .map_err(internal_status)?;
+        Ok(Response::new(ChannelMessageResponse {
+            accepted: result.accepted,
+            message_id: result.message_id,
+            session_id: result.session_id,
+            status: result.status,
+            detail: result.detail,
+        }))
+    }
+
+    async fn get_doctor_report(
+        &self,
+        request: Request<DoctorReportRequest>,
+    ) -> Result<Response<DoctorReportResponse>, Status> {
+        let request = request.into_inner();
+        let report = self
+            .engine
+            .doctor_report(
+                request.include_connectors,
+                request.include_models,
+                request.include_web,
+            )
+            .await
+            .map_err(internal_status)?;
+        Ok(Response::new(DoctorReportResponse {
+            status: report.status,
+            findings: report
+                .findings
+                .into_iter()
+                .map(proto_doctor_finding)
+                .collect(),
+        }))
+    }
+
+    async fn list_model_profiles(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<ModelProfileListResponse>, Status> {
+        Ok(Response::new(ModelProfileListResponse {
+            profiles: self
+                .engine
+                .model_profiles()
+                .into_iter()
+                .map(proto_model_profile)
+                .collect(),
         }))
     }
 
@@ -979,6 +1558,78 @@ fn proto_memory_record(record: MemoryRecord) -> ProtoMemoryRecord {
     }
 }
 
+fn proto_session_record(record: SessionRecord) -> ProtoSessionRecord {
+    ProtoSessionRecord {
+        id: record.id,
+        connector: record.connector,
+        channel_id: record.channel_id,
+        participant: record.participant,
+        session_type: record.session_type,
+        title: record.title,
+        status: record.status,
+        reply_mode: record.reply_mode,
+        queue_mode: record.queue_mode,
+        model_profile: record.model_profile,
+        mention_only: record.mention_only,
+        pending_pairing: record.pending_pairing,
+        last_message_preview: record.last_message_preview,
+        message_count: record.message_count,
+        created_at: record.created_at.to_rfc3339(),
+        updated_at: record.updated_at.to_rfc3339(),
+    }
+}
+
+fn proto_session_message(record: SessionMessageRecord) -> ProtoSessionMessage {
+    ProtoSessionMessage {
+        id: record.id,
+        session_id: record.session_id,
+        connector: record.connector,
+        role: record.role,
+        sender: record.sender,
+        body: record.body,
+        metadata_json: record.metadata_json,
+        created_at: record.created_at.to_rfc3339(),
+    }
+}
+
+fn proto_pairing_record(record: PairingRecord) -> ProtoPairingRecord {
+    ProtoPairingRecord {
+        id: record.id,
+        connector: record.connector,
+        channel_id: record.channel_id,
+        sender: record.sender,
+        session_id: record.session_id,
+        status: record.status,
+        reason: record.reason,
+        created_at: record.created_at.to_rfc3339(),
+        updated_at: record.updated_at.to_rfc3339(),
+    }
+}
+
+fn proto_doctor_finding(record: DoctorFinding) -> ProtoDoctorFinding {
+    ProtoDoctorFinding {
+        id: record.id,
+        component: record.component,
+        severity: record.severity,
+        status: record.status,
+        summary: record.summary,
+        detail: record.detail,
+    }
+}
+
+fn proto_model_profile(record: ModelProfileRecord) -> ModelProfile {
+    ModelProfile {
+        name: record.name,
+        provider_order: record.provider_order,
+        mode: record.mode,
+        timeout_seconds: record.timeout_seconds,
+        retry_budget: record.retry_budget,
+        hosted: record.hosted,
+        auth_mode: record.auth_mode,
+        default_profile: record.default_profile,
+    }
+}
+
 fn proto_brain_entity(record: BrainEntityRecord) -> BrainEntity {
     BrainEntity {
         id: record.id,
@@ -1163,6 +1814,49 @@ impl StateStore {
                 transcript_json text not null,
                 findings_json text not null,
                 created_at text not null
+            );
+            create table if not exists sessions (
+                session_id text primary key,
+                connector text not null,
+                channel_id text not null,
+                participant text not null,
+                session_type text not null,
+                title text not null,
+                status text not null,
+                reply_mode text not null,
+                queue_mode text not null,
+                model_profile text not null,
+                mention_only integer not null,
+                pending_pairing integer not null,
+                archived integer not null,
+                last_message_preview text not null,
+                message_count integer not null,
+                created_at text not null,
+                updated_at text not null,
+                unique (connector, channel_id, participant)
+            );
+            create table if not exists session_messages (
+                message_id text primary key,
+                session_id text not null,
+                connector text not null,
+                role text not null,
+                sender text not null,
+                body text not null,
+                metadata_json text not null,
+                created_at text not null
+            );
+            create table if not exists pairings (
+                pairing_id text primary key,
+                connector text not null,
+                channel_id text not null,
+                sender text not null,
+                session_id text not null,
+                status text not null,
+                reason text not null,
+                note text not null,
+                created_at text not null,
+                updated_at text not null,
+                unique (connector, channel_id, sender)
             );
             create table if not exists brain_entities (
                 entity_id text primary key,
@@ -1470,6 +2164,397 @@ impl StateStore {
             ],
         )?;
         Ok(())
+    }
+
+    fn resolve_session_for_inbound(
+        &self,
+        message: &MessageEnvelope,
+        config: &AppConfig,
+        default_model_profile: &str,
+    ) -> Result<SessionRecord> {
+        let session_type = infer_session_type(message);
+        let participant = if session_type == "group" {
+            message.channel_id.clone()
+        } else {
+            message.sender.clone()
+        };
+        self.resolve_session_internal(
+            &message.connector,
+            &message.channel_id,
+            &participant,
+            &session_type,
+            config,
+            default_model_profile,
+        )
+    }
+
+    fn resolve_session_for_outbound(
+        &self,
+        connector: &str,
+        channel_id: &str,
+        sender: &str,
+        config: &AppConfig,
+    ) -> Result<SessionRecord> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "select session_id, connector, channel_id, participant, session_type, title, status, reply_mode, queue_mode, model_profile, mention_only, pending_pairing, last_message_preview, message_count, created_at, updated_at
+             from sessions where connector = ?1 and channel_id = ?2 and archived = 0
+             order by updated_at desc limit 1",
+        )?;
+        let mut rows = statement.query(params![connector, channel_id])?;
+        if let Some(row) = rows.next()? {
+            return Ok(session_record_from_row(row)?);
+        }
+        drop(rows);
+        drop(statement);
+        drop(connection);
+        self.resolve_session_internal(
+            connector,
+            channel_id,
+            if sender.is_empty() {
+                channel_id
+            } else {
+                sender
+            },
+            "direct",
+            config,
+            &config.model_failover.default_profile,
+        )
+    }
+
+    fn resolve_session_internal(
+        &self,
+        connector_name: &str,
+        channel_id: &str,
+        participant: &str,
+        session_type: &str,
+        config: &AppConfig,
+        default_model_profile: &str,
+    ) -> Result<SessionRecord> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "select session_id, connector, channel_id, participant, session_type, title, status, reply_mode, queue_mode, model_profile, mention_only, pending_pairing, last_message_preview, message_count, created_at, updated_at
+             from sessions where connector = ?1 and channel_id = ?2 and participant = ?3 limit 1",
+        )?;
+        let mut rows = statement.query(params![connector_name, channel_id, participant])?;
+        if let Some(row) = rows.next()? {
+            return Ok(session_record_from_row(row)?);
+        }
+        let connector = config
+            .connectors
+            .get(connector_name)
+            .cloned()
+            .unwrap_or_default();
+        let now = Utc::now().to_rfc3339();
+        let session = SessionRecord {
+            id: format!("session-{}", Uuid::new_v4()),
+            connector: connector_name.to_owned(),
+            channel_id: channel_id.to_owned(),
+            participant: participant.to_owned(),
+            session_type: session_type.to_owned(),
+            title: if session_type == "group" {
+                format!("{connector_name}:{channel_id}")
+            } else {
+                participant.to_owned()
+            },
+            status: "active".to_owned(),
+            reply_mode: config.sessions.default_reply_mode.clone(),
+            queue_mode: config.sessions.default_queue_mode.clone(),
+            model_profile: default_model_profile.to_owned(),
+            mention_only: session_type == "group"
+                && (config.routing.mention_only_in_groups || connector.mention_only),
+            pending_pairing: false,
+            last_message_preview: String::new(),
+            message_count: 0,
+            created_at: parse_timestamp(&now)?,
+            updated_at: parse_timestamp(&now)?,
+        };
+        connection.execute(
+            "insert into sessions (session_id, connector, channel_id, participant, session_type, title, status, reply_mode, queue_mode, model_profile, mention_only, pending_pairing, archived, last_message_preview, message_count, created_at, updated_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, ?14, ?15, ?16)",
+            params![
+                session.id,
+                session.connector,
+                session.channel_id,
+                session.participant,
+                session.session_type,
+                session.title,
+                session.status,
+                session.reply_mode,
+                session.queue_mode,
+                session.model_profile,
+                session.mention_only as i64,
+                session.pending_pairing as i64,
+                session.last_message_preview,
+                session.message_count as i64,
+                now,
+                now,
+            ],
+        )?;
+        Ok(session)
+    }
+
+    fn session_by_id(&self, session_id: &str) -> Result<SessionRecord> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "select session_id, connector, channel_id, participant, session_type, title, status, reply_mode, queue_mode, model_profile, mention_only, pending_pairing, last_message_preview, message_count, created_at, updated_at
+             from sessions where session_id = ?1 limit 1",
+        )?;
+        let mut rows = statement.query(params![session_id])?;
+        let row = rows
+            .next()?
+            .ok_or_else(|| anyhow::anyhow!("session {session_id} not found"))?;
+        Ok(session_record_from_row(row)?)
+    }
+
+    fn record_session_message(
+        &self,
+        session_id: &str,
+        connector: &str,
+        role: &str,
+        sender: &str,
+        body: &str,
+        metadata_json: &str,
+    ) -> Result<String> {
+        let message_id = format!("session-message-{}", Uuid::new_v4());
+        let now = Utc::now().to_rfc3339();
+        let preview = truncate_with_ellipsis(body, 120);
+        let connection = self.connection.lock();
+        connection.execute(
+            "insert into session_messages (message_id, session_id, connector, role, sender, body, metadata_json, created_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                message_id,
+                session_id,
+                connector,
+                role,
+                sender,
+                body,
+                metadata_json,
+                now,
+            ],
+        )?;
+        connection.execute(
+            "update sessions
+             set last_message_preview = ?2,
+                 message_count = message_count + 1,
+                 status = 'active',
+                 updated_at = ?3
+             where session_id = ?1",
+            params![session_id, preview, now],
+        )?;
+        Ok(message_id)
+    }
+
+    fn list_sessions(&self, query: SessionListQuery) -> Result<Vec<SessionRecord>> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "select session_id, connector, channel_id, participant, session_type, title, status, reply_mode, queue_mode, model_profile, mention_only, pending_pairing, last_message_preview, message_count, created_at, updated_at
+             from sessions order by updated_at desc limit 512",
+        )?;
+        let rows = statement.query_map([], session_record_from_row)?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            let session = row?;
+            if !query.include_archived && session.status == "archived" {
+                continue;
+            }
+            if let Some(connector) = &query.connector {
+                if &session.connector != connector {
+                    continue;
+                }
+            }
+            if let Some(status) = &query.status {
+                if &session.status != status {
+                    continue;
+                }
+            }
+            sessions.push(session);
+        }
+        sessions.truncate(query.limit.max(1));
+        Ok(sessions)
+    }
+
+    fn get_session_detail(&self, query: SessionDetailQuery) -> Result<SessionDetail> {
+        let session = self.session_by_id(&query.session_id)?;
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "select message_id, session_id, connector, role, sender, body, metadata_json, created_at
+             from session_messages where session_id = ?1 order by created_at desc limit ?2",
+        )?;
+        let rows = statement.query_map(
+            params![query.session_id, query.limit.max(1) as i64],
+            |row| session_message_from_row(row),
+        )?;
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row?);
+        }
+        messages.reverse();
+        Ok(SessionDetail { session, messages })
+    }
+
+    fn prune_sessions(&self, request: SessionPruneRequestRecord) -> Result<u32> {
+        let threshold =
+            (Utc::now() - Duration::hours(i64::from(request.older_than_hours.max(1)))).to_rfc3339();
+        let connection = self.connection.lock();
+        let changed = if request.archive_only {
+            connection.execute(
+                "update sessions set status = 'archived', archived = 1, updated_at = ?2
+                 where updated_at < ?1 and status != 'archived'",
+                params![threshold, Utc::now().to_rfc3339()],
+            )?
+        } else {
+            connection.execute(
+                "delete from session_messages where session_id in (select session_id from sessions where updated_at < ?1)",
+                params![threshold],
+            )?;
+            connection.execute(
+                "delete from sessions where updated_at < ?1",
+                params![threshold],
+            )?
+        };
+        Ok(changed as u32)
+    }
+
+    fn list_pairings(&self, query: PairingListQuery) -> Result<Vec<PairingRecord>> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "select pairing_id, connector, channel_id, sender, session_id, status, reason, created_at, updated_at
+             from pairings order by updated_at desc limit 512",
+        )?;
+        let rows = statement.query_map([], pairing_record_from_row)?;
+        let mut pairings = Vec::new();
+        for row in rows {
+            let pairing = row?;
+            if let Some(status) = &query.status {
+                if &pairing.status != status {
+                    continue;
+                }
+            }
+            if let Some(connector) = &query.connector {
+                if &pairing.connector != connector {
+                    continue;
+                }
+            }
+            pairings.push(pairing);
+        }
+        pairings.truncate(query.limit.max(1));
+        Ok(pairings)
+    }
+
+    fn ensure_pairing(
+        &self,
+        connector_name: &str,
+        channel_id: &str,
+        sender: &str,
+        session_id: &str,
+        reason: &str,
+    ) -> Result<PairingRecord> {
+        let now = Utc::now().to_rfc3339();
+        let pairing = PairingRecord {
+            id: format!("pairing-{}", Uuid::new_v4()),
+            connector: connector_name.to_owned(),
+            channel_id: channel_id.to_owned(),
+            sender: sender.to_owned(),
+            session_id: session_id.to_owned(),
+            status: "pending".to_owned(),
+            reason: reason.to_owned(),
+            created_at: parse_timestamp(&now)?,
+            updated_at: parse_timestamp(&now)?,
+        };
+        let connection = self.connection.lock();
+        connection.execute(
+            "insert into pairings (pairing_id, connector, channel_id, sender, session_id, status, reason, note, created_at, updated_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?8)
+             on conflict(connector, channel_id, sender)
+             do update set session_id = excluded.session_id, status = excluded.status, reason = excluded.reason, updated_at = excluded.updated_at",
+            params![
+                pairing.id,
+                pairing.connector,
+                pairing.channel_id,
+                pairing.sender,
+                pairing.session_id,
+                pairing.status,
+                pairing.reason,
+                now,
+            ],
+        )?;
+        self.pairing_for_target(connector_name, channel_id, sender)
+    }
+
+    fn pairing_for_target(
+        &self,
+        connector_name: &str,
+        channel_id: &str,
+        sender: &str,
+    ) -> Result<PairingRecord> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "select pairing_id, connector, channel_id, sender, session_id, status, reason, created_at, updated_at
+             from pairings where connector = ?1 and channel_id = ?2 and sender = ?3 limit 1",
+        )?;
+        let mut rows = statement.query(params![connector_name, channel_id, sender])?;
+        let row = rows.next()?.ok_or_else(|| {
+            anyhow::anyhow!("pairing not found for {connector_name}:{channel_id}:{sender}")
+        })?;
+        Ok(pairing_record_from_row(row)?)
+    }
+
+    fn update_pairing(&self, request: PairingUpdate) -> Result<PairingRecord> {
+        let status = match request.action.as_str() {
+            "approve" | "approved" => "approved",
+            "revoke" | "revoked" => "revoked",
+            "pending" => "pending",
+            other => other,
+        };
+        let now = Utc::now().to_rfc3339();
+        let connection = self.connection.lock();
+        connection.execute(
+            "update pairings set status = ?2, note = ?3, updated_at = ?4 where pairing_id = ?1",
+            params![request.pairing_id, status, request.note, now],
+        )?;
+        let mut statement = connection.prepare(
+            "select pairing_id, connector, channel_id, sender, session_id, status, reason, created_at, updated_at
+             from pairings where pairing_id = ?1 limit 1",
+        )?;
+        let mut rows = statement.query(params![request.pairing_id])?;
+        let pairing = pairing_record_from_row(
+            rows.next()?
+                .ok_or_else(|| anyhow::anyhow!("pairing {} not found", request.pairing_id))?,
+        )?;
+        connection.execute(
+            "update sessions set pending_pairing = ?2, updated_at = ?3 where session_id = ?1",
+            params![
+                pairing.session_id,
+                (status == "pending") as i64,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(pairing)
+    }
+
+    fn pairing_is_approved(
+        &self,
+        connector_name: &str,
+        channel_id: &str,
+        sender: &str,
+    ) -> Result<bool> {
+        let pairing = self.pairing_for_target(connector_name, channel_id, sender);
+        Ok(matches!(pairing, Ok(record) if record.status == "approved"))
+    }
+
+    fn set_session_pending_pairing(&self, session_id: &str, value: bool) -> Result<()> {
+        let connection = self.connection.lock();
+        connection.execute(
+            "update sessions set pending_pairing = ?2, updated_at = ?3 where session_id = ?1",
+            params![session_id, value as i64, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    fn clear_session_pending_pairing(&self, session_id: &str) -> Result<()> {
+        self.set_session_pending_pairing(session_id, false)
     }
 }
 
@@ -3505,6 +4590,84 @@ fn parse_timestamp(value: &str) -> Result<DateTime<Utc>> {
         .with_timezone(&Utc))
 }
 
+fn infer_session_type(message: &MessageEnvelope) -> String {
+    if let Ok(metadata) = serde_json::from_str::<Value>(&message.metadata_json) {
+        if let Some(channel_type) = metadata
+            .get("channel_type")
+            .and_then(Value::as_str)
+            .or_else(|| metadata.get("chat_type").and_then(Value::as_str))
+        {
+            return match channel_type {
+                "group" | "supergroup" | "channel" | "room" => "group".to_owned(),
+                _ => "direct".to_owned(),
+            };
+        }
+    }
+    if message.connector == "webchat" {
+        "direct".to_owned()
+    } else if message.channel_id == message.sender {
+        "direct".to_owned()
+    } else {
+        "group".to_owned()
+    }
+}
+
+fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
+    Ok(SessionRecord {
+        id: row.get(0)?,
+        connector: row.get(1)?,
+        channel_id: row.get(2)?,
+        participant: row.get(3)?,
+        session_type: row.get(4)?,
+        title: row.get(5)?,
+        status: row.get(6)?,
+        reply_mode: row.get(7)?,
+        queue_mode: row.get(8)?,
+        model_profile: row.get(9)?,
+        mention_only: row.get::<_, i64>(10)? != 0,
+        pending_pairing: row.get::<_, i64>(11)? != 0,
+        last_message_preview: row.get(12)?,
+        message_count: row.get::<_, i64>(13)? as u32,
+        created_at: parse_timestamp(&row.get::<_, String>(14)?).map_err(sqlite_err)?,
+        updated_at: parse_timestamp(&row.get::<_, String>(15)?).map_err(sqlite_err)?,
+    })
+}
+
+fn session_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMessageRecord> {
+    Ok(SessionMessageRecord {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        connector: row.get(2)?,
+        role: row.get(3)?,
+        sender: row.get(4)?,
+        body: row.get(5)?,
+        metadata_json: row.get(6)?,
+        created_at: parse_timestamp(&row.get::<_, String>(7)?).map_err(sqlite_err)?,
+    })
+}
+
+fn pairing_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairingRecord> {
+    Ok(PairingRecord {
+        id: row.get(0)?,
+        connector: row.get(1)?,
+        channel_id: row.get(2)?,
+        sender: row.get(3)?,
+        session_id: row.get(4)?,
+        status: row.get(5)?,
+        reason: row.get(6)?,
+        created_at: parse_timestamp(&row.get::<_, String>(7)?).map_err(sqlite_err)?,
+        updated_at: parse_timestamp(&row.get::<_, String>(8)?).map_err(sqlite_err)?,
+    })
+}
+
+fn sqlite_err(error: anyhow::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::other(error.to_string())),
+    )
+}
+
 struct OrchestrationResult {
     provider: String,
     response: String,
@@ -3546,7 +4709,12 @@ impl Orchestrator {
         &self.vector_backend
     }
 
-    async fn generate(&self, prompt: &str, priority: QueuePriority) -> Result<OrchestrationResult> {
+    async fn generate_with_route(
+        &self,
+        prompt: &str,
+        priority: QueuePriority,
+        route: &[String],
+    ) -> Result<OrchestrationResult> {
         let _permit = self
             .inflight
             .acquire()
@@ -3596,12 +4764,16 @@ impl Orchestrator {
             }
         }
 
-        let route = if priority == QueuePriority::Background {
-            reverse_provider_order(&self.config.orchestration.provider_order)
+        let live_route = if route.is_empty() {
+            if priority == QueuePriority::Background {
+                reverse_provider_order(&self.config.orchestration.provider_order)
+            } else {
+                self.config.orchestration.provider_order.clone()
+            }
         } else {
-            self.config.orchestration.provider_order.clone()
+            route.to_vec()
         };
-        let (provider, response, cache_tier) = self.generate_live(&route, prompt).await?;
+        let (provider, response, cache_tier) = self.generate_live(&live_route, prompt).await?;
 
         if self.config.orchestration.exact_cache_enabled {
             self.state

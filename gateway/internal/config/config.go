@@ -9,16 +9,24 @@ import (
 )
 
 type Config struct {
-	Gateway      GatewayConfig              `toml:"gateway"`
-	Logging      LoggingConfig              `toml:"logging"`
-	Skills       SkillsConfig               `toml:"skills"`
-	Connectors   map[string]ConnectorConfig `toml:"connectors"`
-	Security     SecurityConfig             `toml:"security"`
-	Brain        BrainConfig                `toml:"brain"`
-	SIEM         SiemConfig                 `toml:"siem"`
-	Operator     OperatorConfig             `toml:"operator"`
-	VectorMemory VectorMemoryConfig         `toml:"vector_memory"`
-	Paths        PathsConfig                `toml:"-"`
+	Gateway       GatewayConfig                 `toml:"gateway"`
+	Logging       LoggingConfig                 `toml:"logging"`
+	Skills        SkillsConfig                  `toml:"skills"`
+	Connectors    map[string]ConnectorConfig    `toml:"connectors"`
+	Security      SecurityConfig                `toml:"security"`
+	Brain         BrainConfig                   `toml:"brain"`
+	Sessions      SessionsConfig                `toml:"sessions"`
+	Routing       RoutingConfig                 `toml:"routing"`
+	Presence      PresenceConfig                `toml:"presence"`
+	Usage         UsageConfig                   `toml:"usage"`
+	Media         MediaConfig                   `toml:"media"`
+	Browser       BrowserConfig                 `toml:"browser"`
+	ModelProfiles map[string]ModelProfileConfig `toml:"model_profiles"`
+	ModelFailover ModelFailoverConfig           `toml:"model_failover"`
+	SIEM          SiemConfig                    `toml:"siem"`
+	Operator      OperatorConfig                `toml:"operator"`
+	VectorMemory  VectorMemoryConfig            `toml:"vector_memory"`
+	Paths         PathsConfig                   `toml:"-"`
 }
 
 type GatewayConfig struct {
@@ -28,7 +36,29 @@ type GatewayConfig struct {
 	TelegramBotToken            string              `toml:"telegram_bot_token"`
 	TelegramPollIntervalSeconds uint64              `toml:"telegram_poll_interval_seconds"`
 	TLS                         GatewayTLSConfig    `toml:"tls"`
+	Web                         GatewayWebConfig    `toml:"web"`
+	Auth                        GatewayAuthConfig   `toml:"auth"`
+	Remote                      GatewayRemoteConfig `toml:"remote"`
 	Allowlists                  map[string][]string `toml:"allowlists"`
+}
+
+type GatewayWebConfig struct {
+	Enabled       bool   `toml:"enabled"`
+	ListenAddress string `toml:"listen_address"`
+	UIDir         string `toml:"ui_dir"`
+	CORSOrigin    string `toml:"cors_origin"`
+}
+
+type GatewayAuthConfig struct {
+	Enabled  bool   `toml:"enabled"`
+	Token    string `toml:"token"`
+	Password string `toml:"password"`
+}
+
+type GatewayRemoteConfig struct {
+	Enabled       bool   `toml:"enabled"`
+	Mode          string `toml:"mode"`
+	PublicBaseURL string `toml:"public_base_url"`
 }
 
 type GatewayTLSConfig struct {
@@ -51,11 +81,63 @@ type SkillsConfig struct {
 }
 
 type ConnectorConfig struct {
-	Enabled   bool     `toml:"enabled"`
-	Mode      string   `toml:"mode"`
-	Endpoint  string   `toml:"endpoint"`
-	Allowlist []string `toml:"allowlist"`
-	APIFirst  bool     `toml:"api_first"`
+	Enabled     bool     `toml:"enabled"`
+	Mode        string   `toml:"mode"`
+	Endpoint    string   `toml:"endpoint"`
+	Allowlist   []string `toml:"allowlist"`
+	APIFirst    bool     `toml:"api_first"`
+	Deferred    bool     `toml:"deferred"`
+	AuthMode    string   `toml:"auth_mode"`
+	PairDM      bool     `toml:"pair_dm"`
+	ChunkLimit  uint64   `toml:"chunk_limit"`
+	MentionOnly bool     `toml:"mention_only"`
+}
+
+type SessionsConfig struct {
+	Enabled          bool   `toml:"enabled"`
+	DefaultReplyMode string `toml:"default_reply_mode"`
+	DefaultQueueMode string `toml:"default_queue_mode"`
+	PruneAfterHours  uint32 `toml:"prune_after_hours"`
+}
+
+type RoutingConfig struct {
+	AutoPairDM          bool     `toml:"auto_pair_dm"`
+	MentionOnlyInGroups bool     `toml:"mention_only_in_groups"`
+	MentionNames        []string `toml:"mention_names"`
+}
+
+type PresenceConfig struct {
+	Enabled      bool `toml:"enabled"`
+	TypingEvents bool `toml:"typing_events"`
+}
+
+type UsageConfig struct {
+	Enabled bool `toml:"enabled"`
+}
+
+type MediaConfig struct {
+	Enabled        bool   `toml:"enabled"`
+	MaxUploadBytes uint64 `toml:"max_upload_bytes"`
+	TempDir        string `toml:"temp_dir"`
+}
+
+type BrowserConfig struct {
+	Enabled    bool   `toml:"enabled"`
+	ProfileDir string `toml:"profile_dir"`
+}
+
+type ModelProfileConfig struct {
+	ProviderOrder  []string `toml:"provider_order"`
+	Mode           string   `toml:"mode"`
+	TimeoutSeconds uint32   `toml:"timeout_seconds"`
+	RetryBudget    uint32   `toml:"retry_budget"`
+	Hosted         bool     `toml:"hosted"`
+	AuthMode       string   `toml:"auth_mode"`
+}
+
+type ModelFailoverConfig struct {
+	DefaultProfile  string `toml:"default_profile"`
+	FallbackProfile string `toml:"fallback_profile"`
 }
 
 type SecurityConfig struct {
@@ -143,11 +225,47 @@ func Load() (*Config, error) {
 	if cfg.Gateway.TelegramPollIntervalSeconds == 0 {
 		cfg.Gateway.TelegramPollIntervalSeconds = 5
 	}
+	if !cfg.Gateway.Web.Enabled && cfg.Gateway.Web.ListenAddress == "" {
+		cfg.Gateway.Web.ListenAddress = "127.0.0.1:8088"
+	}
+	if cfg.Gateway.Web.ListenAddress == "" {
+		cfg.Gateway.Web.ListenAddress = "127.0.0.1:8088"
+	}
+	if cfg.Gateway.Web.UIDir == "" {
+		cfg.Gateway.Web.UIDir = "ui/build/web"
+	}
+	if cfg.Gateway.Remote.Mode == "" {
+		cfg.Gateway.Remote.Mode = "disabled"
+	}
 	if cfg.Connectors == nil {
 		cfg.Connectors = map[string]ConnectorConfig{}
 	}
 	if cfg.Gateway.Allowlists == nil {
 		cfg.Gateway.Allowlists = map[string][]string{}
+	}
+	if cfg.ModelProfiles == nil {
+		cfg.ModelProfiles = map[string]ModelProfileConfig{
+			"default": {
+				ProviderOrder:  []string{"llamacpp", "ollama", "localai"},
+				Mode:           "local-first",
+				TimeoutSeconds: 20,
+				RetryBudget:    2,
+			},
+			"hosted-fallback": {
+				ProviderOrder:  []string{"llamacpp", "ollama", "localai"},
+				Mode:           "hybrid-failover",
+				TimeoutSeconds: 30,
+				RetryBudget:    3,
+				Hosted:         true,
+				AuthMode:       "api-key",
+			},
+		}
+	}
+	if cfg.ModelFailover.DefaultProfile == "" {
+		cfg.ModelFailover.DefaultProfile = "default"
+	}
+	if cfg.ModelFailover.FallbackProfile == "" {
+		cfg.ModelFailover.FallbackProfile = "hosted-fallback"
 	}
 
 	return &cfg, nil

@@ -6,9 +6,11 @@ import (
 	"crypto/x509"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/PeshalaDilshan/openpinch/gateway/internal/config"
 	"github.com/PeshalaDilshan/openpinch/gateway/internal/connectors"
@@ -54,6 +56,19 @@ func main() {
 	if err := service.Register(grpcServer); err != nil {
 		log.Fatalf("register gateway service: %v", err)
 	}
+	var webServer *http.Server
+	if cfg.Gateway.Web.Enabled {
+		webServer = &http.Server{
+			Addr:    cfg.Gateway.Web.ListenAddress,
+			Handler: service.HTTPHandler(),
+		}
+		go func() {
+			log.Printf("OpenPinch web gateway listening on %s", cfg.Gateway.Web.ListenAddress)
+			if err := webServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("web gateway stopped: %v", err)
+			}
+		}()
+	}
 
 	listener, err := net.Listen("tcp", cfg.Gateway.ListenAddress)
 	if err != nil {
@@ -78,6 +93,11 @@ func main() {
 		<-signals
 		log.Printf("gateway shutting down")
 		registry.Stop()
+		if webServer != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = webServer.Shutdown(shutdownCtx)
+		}
 		grpcServer.GracefulStop()
 	}()
 

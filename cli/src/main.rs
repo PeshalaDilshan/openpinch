@@ -5,8 +5,9 @@ use openpinch_common::openpinch::{
     AgentMessage, AgentProtocolRequest, AttestationRequest, AuditExportRequest, BrainEntity,
     BrainFact, BrainForgetRequest, BrainRecallRequest, BrainRelation, BrainRememberRequest,
     BrainSuggestRequest, BrainSuggestion, BrainTask, BrainTaskListRequest, BrainTaskUpdateRequest,
-    ConnectorStatusRequest, Empty, ExecuteRequest, MemoryQueryRequest, MemoryUpsertRequest,
-    PolicyReportRequest,
+    ChannelMessageRequest, ConnectorStatusRequest, DoctorReportRequest, Empty, ExecuteRequest,
+    MemoryQueryRequest, MemoryUpsertRequest, PairingListRequest, PairingUpdateRequest,
+    PolicyReportRequest, SessionListRequest, SessionPruneRequest, SessionRequest,
 };
 use openpinch_common::{AppConfig, OpenPinchPaths, QueuePriority};
 use openpinch_engine::{
@@ -35,6 +36,8 @@ enum Commands {
     Start(StartCommand),
     Execute(ExecuteCommand),
     Status,
+    Onboard,
+    Doctor,
     Skill {
         #[command(subcommand)]
         command: SkillCommand,
@@ -51,6 +54,22 @@ enum Commands {
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
+    },
+    Message {
+        #[command(subcommand)]
+        command: MessageCommand,
+    },
+    Pairing {
+        #[command(subcommand)]
+        command: PairingCommand,
+    },
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+    Model {
+        #[command(subcommand)]
+        command: ModelCommand,
     },
     Brain {
         #[command(subcommand)]
@@ -149,6 +168,74 @@ enum MemoryCommand {
         #[arg(long, default_value = "{}")]
         metadata: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum MessageCommand {
+    Send {
+        connector: String,
+        channel_id: String,
+        body: String,
+        #[arg(long, default_value = "openpinch")]
+        sender: String,
+        #[arg(long, default_value = "{}")]
+        metadata: String,
+        #[arg(long, default_value = "")]
+        session_id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PairingCommand {
+    List {
+        #[arg(long, default_value = "")]
+        status: String,
+        #[arg(long, default_value = "")]
+        connector: String,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    Approve {
+        pairing_id: String,
+        #[arg(long, default_value = "approved from CLI")]
+        note: String,
+    },
+    Revoke {
+        pairing_id: String,
+        #[arg(long, default_value = "revoked from CLI")]
+        note: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommand {
+    List {
+        #[arg(long, default_value = "")]
+        connector: String,
+        #[arg(long, default_value = "")]
+        status: String,
+        #[arg(long, default_value_t = false)]
+        include_archived: bool,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    Show {
+        session_id: String,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    Prune {
+        #[arg(long, default_value_t = 336)]
+        older_than_hours: u32,
+        #[arg(long, default_value_t = true)]
+        archive_only: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ModelCommand {
+    Profile,
+    Failover,
 }
 
 #[derive(Debug, Subcommand)]
@@ -292,6 +379,8 @@ async fn main() -> Result<()> {
         Commands::Start(command) => start_runtime(config, paths, command, cli.json).await?,
         Commands::Execute(command) => execute_command(config, paths, command, cli.json).await?,
         Commands::Status => show_status(&config, &paths, cli.json).await?,
+        Commands::Onboard => handle_onboard_command(&config, &paths, cli.json).await?,
+        Commands::Doctor => handle_doctor_command(&config, &paths, cli.json).await?,
         Commands::Skill { command } => {
             handle_skill_command(config, paths, command, cli.json).await?
         }
@@ -301,6 +390,10 @@ async fn main() -> Result<()> {
             handle_connector_command(&config, command, cli.json).await?
         }
         Commands::Memory { command } => handle_memory_command(&config, command, cli.json).await?,
+        Commands::Message { command } => handle_message_command(&config, command, cli.json).await?,
+        Commands::Pairing { command } => handle_pairing_command(&config, command, cli.json).await?,
+        Commands::Session { command } => handle_session_command(&config, command, cli.json).await?,
+        Commands::Model { command } => handle_model_command(&config, command, cli.json).await?,
         Commands::Brain { command } => handle_brain_command(&config, command, cli.json).await?,
         Commands::Policy { command } => handle_policy_command(&config, command, cli.json).await?,
         Commands::Audit { command } => handle_audit_command(&config, command, cli.json).await?,
@@ -790,6 +883,267 @@ async fn handle_memory_command(
     Ok(())
 }
 
+async fn handle_onboard_command(
+    config: &AppConfig,
+    paths: &OpenPinchPaths,
+    json_output: bool,
+) -> Result<()> {
+    let doctor = doctor_value(config, paths).await?;
+    let value = json!({
+        "config": paths.config_file,
+        "gateway_grpc": config.gateway.listen_address,
+        "gateway_web": config.gateway.web.listen_address,
+        "remote_mode": config.gateway.remote.mode,
+        "doctor": doctor,
+        "next_steps": [
+            format!("openpinch start --foreground"),
+            format!("openpinch doctor"),
+            format!("visit http://{}", config.gateway.web.listen_address),
+        ],
+    });
+    emit(
+        json_output,
+        value.clone(),
+        serde_json::to_string_pretty(&value)?,
+    );
+    Ok(())
+}
+
+async fn handle_doctor_command(
+    config: &AppConfig,
+    paths: &OpenPinchPaths,
+    json_output: bool,
+) -> Result<()> {
+    let value = doctor_value(config, paths).await?;
+    emit(
+        json_output,
+        value.clone(),
+        serde_json::to_string_pretty(&value)?,
+    );
+    Ok(())
+}
+
+async fn handle_message_command(
+    config: &AppConfig,
+    command: MessageCommand,
+    json_output: bool,
+) -> Result<()> {
+    let mut client = connect_gateway(config).await?;
+    match command {
+        MessageCommand::Send {
+            connector,
+            channel_id,
+            body,
+            sender,
+            metadata,
+            session_id,
+        } => {
+            let response = client
+                .send_channel_message(ChannelMessageRequest {
+                    connector,
+                    channel_id,
+                    sender,
+                    body,
+                    metadata_json: metadata,
+                    session_id,
+                })
+                .await?
+                .into_inner();
+            let value = json!({
+                "accepted": response.accepted,
+                "message_id": response.message_id,
+                "session_id": response.session_id,
+                "status": response.status,
+                "detail": response.detail,
+            });
+            emit(
+                json_output,
+                value.clone(),
+                serde_json::to_string_pretty(&value)?,
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn handle_pairing_command(
+    config: &AppConfig,
+    command: PairingCommand,
+    json_output: bool,
+) -> Result<()> {
+    let mut client = connect_gateway(config).await?;
+    match command {
+        PairingCommand::List {
+            status,
+            connector,
+            limit,
+        } => {
+            let response = client
+                .list_pairings(PairingListRequest {
+                    status,
+                    connector,
+                    limit,
+                })
+                .await?
+                .into_inner();
+            let value = json!({
+                "pairings": response.pairings.iter().map(pairing_json).collect::<Vec<_>>(),
+            });
+            emit(
+                json_output,
+                value.clone(),
+                serde_json::to_string_pretty(&value)?,
+            );
+        }
+        PairingCommand::Approve { pairing_id, note } => {
+            let response = client
+                .update_pairing(PairingUpdateRequest {
+                    pairing_id,
+                    action: "approve".to_owned(),
+                    note,
+                })
+                .await?
+                .into_inner();
+            let value = json!({
+                "updated": response.updated,
+                "pairing": response.pairing.as_ref().map(pairing_json),
+            });
+            emit(
+                json_output,
+                value.clone(),
+                serde_json::to_string_pretty(&value)?,
+            );
+        }
+        PairingCommand::Revoke { pairing_id, note } => {
+            let response = client
+                .update_pairing(PairingUpdateRequest {
+                    pairing_id,
+                    action: "revoke".to_owned(),
+                    note,
+                })
+                .await?
+                .into_inner();
+            let value = json!({
+                "updated": response.updated,
+                "pairing": response.pairing.as_ref().map(pairing_json),
+            });
+            emit(
+                json_output,
+                value.clone(),
+                serde_json::to_string_pretty(&value)?,
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn handle_session_command(
+    config: &AppConfig,
+    command: SessionCommand,
+    json_output: bool,
+) -> Result<()> {
+    let mut client = connect_gateway(config).await?;
+    match command {
+        SessionCommand::List {
+            connector,
+            status,
+            include_archived,
+            limit,
+        } => {
+            let response = client
+                .list_sessions(SessionListRequest {
+                    connector,
+                    status,
+                    include_archived,
+                    limit,
+                })
+                .await?
+                .into_inner();
+            let value = json!({
+                "summary": response.summary,
+                "sessions": response.sessions.iter().map(session_json).collect::<Vec<_>>(),
+            });
+            emit(
+                json_output,
+                value.clone(),
+                serde_json::to_string_pretty(&value)?,
+            );
+        }
+        SessionCommand::Show { session_id, limit } => {
+            let response = client
+                .get_session(SessionRequest { session_id, limit })
+                .await?
+                .into_inner();
+            let value = json!({
+                "session": response.session.as_ref().map(session_json),
+                "messages": response.messages.iter().map(session_message_json).collect::<Vec<_>>(),
+            });
+            emit(
+                json_output,
+                value.clone(),
+                serde_json::to_string_pretty(&value)?,
+            );
+        }
+        SessionCommand::Prune {
+            older_than_hours,
+            archive_only,
+        } => {
+            let response = client
+                .prune_sessions(SessionPruneRequest {
+                    older_than_hours,
+                    archive_only,
+                })
+                .await?
+                .into_inner();
+            let value = json!({ "pruned": response.pruned, "archive_only": archive_only });
+            emit(
+                json_output,
+                value.clone(),
+                serde_json::to_string_pretty(&value)?,
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn handle_model_command(
+    config: &AppConfig,
+    command: ModelCommand,
+    json_output: bool,
+) -> Result<()> {
+    let mut client = connect_gateway(config).await?;
+    let profiles = client
+        .list_model_profiles(Empty {})
+        .await?
+        .into_inner()
+        .profiles;
+    match command {
+        ModelCommand::Profile => {
+            let value = json!({
+                "profiles": profiles.iter().map(model_profile_json).collect::<Vec<_>>(),
+            });
+            emit(
+                json_output,
+                value.clone(),
+                serde_json::to_string_pretty(&value)?,
+            );
+        }
+        ModelCommand::Failover => {
+            let value = json!({
+                "default_profile": config.model_failover.default_profile,
+                "fallback_profile": config.model_failover.fallback_profile,
+                "profiles": profiles.iter().map(model_profile_json).collect::<Vec<_>>(),
+            });
+            emit(
+                json_output,
+                value.clone(),
+                serde_json::to_string_pretty(&value)?,
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn handle_brain_command(
     config: &AppConfig,
     command: BrainCommand,
@@ -1245,6 +1599,108 @@ fn brain_suggestion_json(suggestion: &BrainSuggestion) -> serde_json::Value {
         "score": suggestion.score,
         "context_json": suggestion.context_json,
     })
+}
+
+fn session_json(session: &openpinch_common::openpinch::SessionRecord) -> serde_json::Value {
+    json!({
+        "id": session.id,
+        "connector": session.connector,
+        "channel_id": session.channel_id,
+        "participant": session.participant,
+        "session_type": session.session_type,
+        "title": session.title,
+        "status": session.status,
+        "reply_mode": session.reply_mode,
+        "queue_mode": session.queue_mode,
+        "model_profile": session.model_profile,
+        "mention_only": session.mention_only,
+        "pending_pairing": session.pending_pairing,
+        "last_message_preview": session.last_message_preview,
+        "message_count": session.message_count,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+    })
+}
+
+fn session_message_json(
+    message: &openpinch_common::openpinch::SessionMessage,
+) -> serde_json::Value {
+    json!({
+        "id": message.id,
+        "session_id": message.session_id,
+        "connector": message.connector,
+        "role": message.role,
+        "sender": message.sender,
+        "body": message.body,
+        "metadata_json": message.metadata_json,
+        "created_at": message.created_at,
+    })
+}
+
+fn pairing_json(pairing: &openpinch_common::openpinch::PairingRecord) -> serde_json::Value {
+    json!({
+        "id": pairing.id,
+        "connector": pairing.connector,
+        "channel_id": pairing.channel_id,
+        "sender": pairing.sender,
+        "session_id": pairing.session_id,
+        "status": pairing.status,
+        "reason": pairing.reason,
+        "created_at": pairing.created_at,
+        "updated_at": pairing.updated_at,
+    })
+}
+
+fn model_profile_json(profile: &openpinch_common::openpinch::ModelProfile) -> serde_json::Value {
+    json!({
+        "name": profile.name,
+        "provider_order": profile.provider_order,
+        "mode": profile.mode,
+        "timeout_seconds": profile.timeout_seconds,
+        "retry_budget": profile.retry_budget,
+        "hosted": profile.hosted,
+        "auth_mode": profile.auth_mode,
+        "default_profile": profile.default_profile,
+    })
+}
+
+async fn doctor_value(config: &AppConfig, paths: &OpenPinchPaths) -> Result<serde_json::Value> {
+    let gateway = format!("http://{}", config.gateway.listen_address);
+    if let Ok(mut client) = GatewayServiceClient::connect(gateway).await {
+        let response = client
+            .get_doctor_report(DoctorReportRequest {
+                include_connectors: true,
+                include_models: true,
+                include_web: true,
+            })
+            .await?
+            .into_inner();
+        return Ok(json!({
+            "status": response.status,
+            "findings": response.findings.iter().map(|finding| json!({
+                "id": finding.id,
+                "component": finding.component,
+                "severity": finding.severity,
+                "status": finding.status,
+                "summary": finding.summary,
+                "detail": finding.detail,
+            })).collect::<Vec<_>>(),
+        }));
+    }
+
+    let runtime = EngineRuntime::bootstrap(config.clone(), paths.clone()).await?;
+    let report = runtime.doctor_report(true, true, true).await?;
+    Ok(json!({
+        "status": report.status,
+        "findings": report.findings.iter().map(|finding| json!({
+            "id": finding.id,
+            "component": finding.component,
+            "severity": finding.severity,
+            "status": finding.status,
+            "summary": finding.summary,
+            "detail": finding.detail,
+        })).collect::<Vec<_>>(),
+    }))
 }
 
 async fn connect_gateway(
