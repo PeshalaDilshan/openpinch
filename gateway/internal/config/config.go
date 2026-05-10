@@ -21,6 +21,7 @@ type Config struct {
 	Usage         UsageConfig                   `toml:"usage"`
 	Media         MediaConfig                   `toml:"media"`
 	Browser       BrowserConfig                 `toml:"browser"`
+	Desktop       DesktopConfig                 `toml:"desktop"`
 	ModelProfiles map[string]ModelProfileConfig `toml:"model_profiles"`
 	ModelFailover ModelFailoverConfig           `toml:"model_failover"`
 	SIEM          SiemConfig                    `toml:"siem"`
@@ -30,35 +31,19 @@ type Config struct {
 }
 
 type GatewayConfig struct {
-	ListenAddress               string              `toml:"listen_address"`
-	Binary                      string              `toml:"binary"`
-	EngineEndpoint              string              `toml:"engine_endpoint"`
-	TelegramBotToken            string              `toml:"telegram_bot_token"`
-	TelegramPollIntervalSeconds uint64              `toml:"telegram_poll_interval_seconds"`
-	TLS                         GatewayTLSConfig    `toml:"tls"`
-	Web                         GatewayWebConfig    `toml:"web"`
-	Auth                        GatewayAuthConfig   `toml:"auth"`
-	Remote                      GatewayRemoteConfig `toml:"remote"`
-	Allowlists                  map[string][]string `toml:"allowlists"`
+	ListenAddress               string                 `toml:"listen_address"`
+	Binary                      string                 `toml:"binary"`
+	EngineEndpoint              string                 `toml:"engine_endpoint"`
+	TelegramBotToken            string                 `toml:"telegram_bot_token"`
+	TelegramPollIntervalSeconds uint64                 `toml:"telegram_poll_interval_seconds"`
+	TLS                         GatewayTLSConfig       `toml:"tls"`
+	LocalHTTP                   GatewayLocalHTTPConfig `toml:"local_http"`
+	Allowlists                  map[string][]string    `toml:"allowlists"`
 }
 
-type GatewayWebConfig struct {
+type GatewayLocalHTTPConfig struct {
 	Enabled       bool   `toml:"enabled"`
 	ListenAddress string `toml:"listen_address"`
-	UIDir         string `toml:"ui_dir"`
-	CORSOrigin    string `toml:"cors_origin"`
-}
-
-type GatewayAuthConfig struct {
-	Enabled  bool   `toml:"enabled"`
-	Token    string `toml:"token"`
-	Password string `toml:"password"`
-}
-
-type GatewayRemoteConfig struct {
-	Enabled       bool   `toml:"enabled"`
-	Mode          string `toml:"mode"`
-	PublicBaseURL string `toml:"public_base_url"`
 }
 
 type GatewayTLSConfig struct {
@@ -124,6 +109,15 @@ type MediaConfig struct {
 type BrowserConfig struct {
 	Enabled    bool   `toml:"enabled"`
 	ProfileDir string `toml:"profile_dir"`
+}
+
+type DesktopConfig struct {
+	LaunchAtLogin       bool   `toml:"launch_at_login"`
+	EnableTray          bool   `toml:"enable_tray"`
+	EnableNotifications bool   `toml:"enable_notifications"`
+	StartHidden         bool   `toml:"start_hidden"`
+	ProfileName         string `toml:"profile_name"`
+	BundledRuntime      bool   `toml:"bundled_runtime"`
 }
 
 type ModelProfileConfig struct {
@@ -225,23 +219,18 @@ func Load() (*Config, error) {
 	if cfg.Gateway.TelegramPollIntervalSeconds == 0 {
 		cfg.Gateway.TelegramPollIntervalSeconds = 5
 	}
-	if !cfg.Gateway.Web.Enabled && cfg.Gateway.Web.ListenAddress == "" {
-		cfg.Gateway.Web.ListenAddress = "127.0.0.1:8088"
-	}
-	if cfg.Gateway.Web.ListenAddress == "" {
-		cfg.Gateway.Web.ListenAddress = "127.0.0.1:8088"
-	}
-	if cfg.Gateway.Web.UIDir == "" {
-		cfg.Gateway.Web.UIDir = "ui/build/web"
-	}
-	if cfg.Gateway.Remote.Mode == "" {
-		cfg.Gateway.Remote.Mode = "disabled"
+	if cfg.Gateway.LocalHTTP.ListenAddress == "" {
+		cfg.Gateway.LocalHTTP.ListenAddress = "127.0.0.1:8088"
 	}
 	if cfg.Connectors == nil {
 		cfg.Connectors = map[string]ConnectorConfig{}
 	}
+	migrateLegacyConnectors(cfg.Connectors)
 	if cfg.Gateway.Allowlists == nil {
 		cfg.Gateway.Allowlists = map[string][]string{}
+	}
+	if cfg.Desktop.ProfileName == "" {
+		cfg.Desktop.ProfileName = "default"
 	}
 	if cfg.ModelProfiles == nil {
 		cfg.ModelProfiles = map[string]ModelProfileConfig{
@@ -269,6 +258,34 @@ func Load() (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+func migrateLegacyConnectors(connectors map[string]ConnectorConfig) {
+	if legacy, ok := connectors["webchat"]; ok {
+		if legacy.Mode == "" || legacy.Mode == "web" {
+			legacy.Mode = "native"
+		}
+		if legacy.AuthMode == "" || legacy.AuthMode == "local-session" {
+			legacy.AuthMode = "local-process"
+		}
+		legacy.Deferred = false
+		legacy.PairDM = false
+		legacy.MentionOnly = false
+		connectors["desktop"] = legacy
+		delete(connectors, "webchat")
+	}
+	if _, ok := connectors["desktop"]; !ok {
+		connectors["desktop"] = ConnectorConfig{
+			Enabled:     true,
+			Mode:        "native",
+			APIFirst:    true,
+			Deferred:    false,
+			AuthMode:    "local-process",
+			PairDM:      false,
+			ChunkLimit:  1800,
+			MentionOnly: false,
+		}
+	}
 }
 
 func discoverConfigPath() (string, error) {

@@ -18,6 +18,7 @@ clap.workspace = true
 openpinch-common = { path = "../core/crates/common" }
 openpinch-engine = { path = "../core/crates/engine" }
 openpinch-tools = { path = "../core/crates/tools" }
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

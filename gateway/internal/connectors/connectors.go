@@ -36,7 +36,7 @@ func NewRegistry(cfg *config.Config, bridge *enginebridge.Client) *Registry {
 	return &Registry{
 		connectors: []Connector{
 			NewTelegram(cfg, bridge),
-			NewWebChat(cfg),
+			NewDesktop(cfg),
 			newStub(cfg, "discord", "bot"),
 			newStub(cfg, "slack", "socket-mode"),
 			newStub(cfg, "whatsapp", "cloud-api"),

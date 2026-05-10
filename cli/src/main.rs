@@ -8,16 +8,19 @@ use openpinch_common::openpinch::{
     ChannelMessageRequest, ConnectorStatusRequest, DoctorReportRequest, Empty, ExecuteRequest,
     MemoryQueryRequest, MemoryUpsertRequest, PairingListRequest, PairingUpdateRequest,
     PolicyReportRequest, SessionListRequest, SessionPruneRequest, SessionRequest,
+    SubmitMessageRequest,
 };
 use openpinch_common::{AppConfig, OpenPinchPaths, QueuePriority};
 use openpinch_engine::{
-    EngineRuntime, fetch_gateway_status, load_runtime_status, wait_for_gateway,
+    EngineHandle, EngineRuntime, fetch_gateway_status, load_runtime_status, wait_for_gateway,
 };
 use openpinch_tools::SkillManager;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -38,6 +41,10 @@ enum Commands {
     Status,
     Onboard,
     Doctor,
+    Desktop {
+        #[command(subcommand)]
+        command: DesktopCommand,
+    },
     Skill {
         #[command(subcommand)]
         command: SkillCommand,
@@ -129,6 +136,13 @@ enum SkillCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum DesktopCommand {
+    Host,
+    Health,
+    Shutdown,
+}
+
+#[derive(Debug, Subcommand)]
 enum ConfigCommand {
     Init,
     Show,
@@ -172,6 +186,15 @@ enum MemoryCommand {
 
 #[derive(Debug, Subcommand)]
 enum MessageCommand {
+    Post {
+        connector: String,
+        channel_id: String,
+        body: String,
+        #[arg(long, default_value = "desktop-user")]
+        sender: String,
+        #[arg(long, default_value = "{}")]
+        metadata: String,
+    },
     Send {
         connector: String,
         channel_id: String,
@@ -367,6 +390,16 @@ enum OperatorCommand {
     Status,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DesktopHostState {
+    status: String,
+    host_pid: u32,
+    gateway_endpoint: String,
+    runtime_endpoint: String,
+    log_file: String,
+    started_at: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -381,6 +414,9 @@ async fn main() -> Result<()> {
         Commands::Status => show_status(&config, &paths, cli.json).await?,
         Commands::Onboard => handle_onboard_command(&config, &paths, cli.json).await?,
         Commands::Doctor => handle_doctor_command(&config, &paths, cli.json).await?,
+        Commands::Desktop { command } => {
+            handle_desktop_command(config, paths, command, cli.json).await?
+        }
         Commands::Skill { command } => {
             handle_skill_command(config, paths, command, cli.json).await?
         }
@@ -412,17 +448,7 @@ async fn start_runtime(
     command: StartCommand,
     json_output: bool,
 ) -> Result<()> {
-    let runtime = EngineRuntime::bootstrap(config.clone(), paths.clone()).await?;
-    let shutdown = CancellationToken::new();
-    let handle = runtime.start_private_rpc(shutdown.clone()).await?;
-    runtime.write_runtime_state(&config.gateway.listen_address, &handle.endpoint)?;
-
-    let mut gateway = spawn_gateway(&config, &paths, &handle.endpoint).await?;
-    wait_for_gateway(
-        &config.gateway.listen_address,
-        std::time::Duration::from_secs(5),
-    )
-    .await?;
+    let (_runtime, handle, gateway) = boot_runtime_sidecars(&config, &paths).await?;
     info!("OpenPinch runtime started");
     info!("engine endpoint: {}", handle.endpoint);
     info!("gateway endpoint: {}", config.gateway.listen_address);
@@ -448,15 +474,226 @@ async fn start_runtime(
         .await
         .context("failed to listen for Ctrl+C")?;
     info!("shutting down");
+    shutdown_runtime_sidecars(handle, gateway).await?;
 
+    Ok(())
+}
+
+async fn boot_runtime_sidecars(
+    config: &AppConfig,
+    paths: &OpenPinchPaths,
+) -> Result<(EngineRuntime, EngineHandle, tokio::process::Child)> {
+    let runtime = EngineRuntime::bootstrap(config.clone(), paths.clone()).await?;
+    let shutdown = CancellationToken::new();
+    let handle = runtime.start_private_rpc(shutdown).await?;
+    runtime.write_runtime_state(&config.gateway.listen_address, &handle.endpoint)?;
+    let gateway = spawn_gateway(config, paths, &handle.endpoint).await?;
+    wait_for_gateway(&config.gateway.listen_address, Duration::from_secs(5)).await?;
+    Ok((runtime, handle, gateway))
+}
+
+async fn shutdown_runtime_sidecars(
+    handle: EngineHandle,
+    mut gateway: tokio::process::Child,
+) -> Result<()> {
     if let Some(id) = gateway.id() {
         info!("terminating gateway process {}", id);
     }
     let _ = gateway.start_kill();
     let _ = gateway.wait().await;
     handle.shutdown().await?;
-
     Ok(())
+}
+
+async fn handle_desktop_command(
+    config: AppConfig,
+    paths: OpenPinchPaths,
+    command: DesktopCommand,
+    json_output: bool,
+) -> Result<()> {
+    match command {
+        DesktopCommand::Host => run_desktop_host(config, paths, json_output).await,
+        DesktopCommand::Health => show_desktop_health(&paths, json_output).await,
+        DesktopCommand::Shutdown => shutdown_desktop_host(&paths, json_output).await,
+    }
+}
+
+async fn run_desktop_host(
+    config: AppConfig,
+    paths: OpenPinchPaths,
+    json_output: bool,
+) -> Result<()> {
+    if let Some(state) = healthy_desktop_host(&paths).await? {
+        emit(
+            json_output,
+            json!({
+                "status": "already_running",
+                "host": state.clone(),
+            }),
+            format!("Desktop host already running on {}", state.gateway_endpoint),
+        );
+        return Ok(());
+    }
+
+    let _ = std::fs::remove_file(desktop_shutdown_file(&paths));
+    let _ = std::fs::remove_file(desktop_host_state_file(&paths));
+
+    let (_runtime, handle, mut gateway) = boot_runtime_sidecars(&config, &paths).await?;
+    let state = DesktopHostState {
+        status: "running".to_owned(),
+        host_pid: std::process::id(),
+        gateway_endpoint: config.gateway.listen_address.clone(),
+        runtime_endpoint: handle.endpoint.clone(),
+        log_file: paths.log_file.display().to_string(),
+        started_at: now_unix_timestamp(),
+    };
+    write_desktop_host_state(&paths, &state)?;
+    emit(
+        json_output,
+        json!({
+            "status": "running",
+            "host": state.clone(),
+        }),
+        format!(
+            "Desktop host started. Gateway: {}",
+            config.gateway.listen_address
+        ),
+    );
+
+    loop {
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("failed to listen for Ctrl+C")?;
+                break;
+            }
+            _ = sleep(Duration::from_millis(500)) => {
+                if desktop_shutdown_file(&paths).exists() {
+                    break;
+                }
+                if let Some(status) = gateway.try_wait().context("poll gateway process")? {
+                    let crashed = DesktopHostState {
+                        status: "gateway_exited".to_owned(),
+                        host_pid: std::process::id(),
+                        gateway_endpoint: config.gateway.listen_address.clone(),
+                        runtime_endpoint: handle.endpoint.clone(),
+                        log_file: paths.log_file.display().to_string(),
+                        started_at: state.started_at.clone(),
+                    };
+                    write_desktop_host_state(&paths, &crashed)?;
+                    return Err(anyhow!("gateway exited with status {status}"));
+                }
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(desktop_shutdown_file(&paths));
+    let _ = std::fs::remove_file(desktop_host_state_file(&paths));
+    shutdown_runtime_sidecars(handle, gateway).await?;
+    Ok(())
+}
+
+async fn show_desktop_health(paths: &OpenPinchPaths, json_output: bool) -> Result<()> {
+    match load_desktop_host_state(paths) {
+        Ok(state) => {
+            let healthy = wait_for_gateway(&state.gateway_endpoint, Duration::from_millis(500))
+                .await
+                .is_ok();
+            emit(
+                json_output,
+                json!({
+                    "status": if healthy { "running" } else { "stale" },
+                    "healthy": healthy,
+                    "host": state.clone(),
+                }),
+                if healthy {
+                    format!("Desktop host running on {}", state.gateway_endpoint)
+                } else {
+                    format!(
+                        "Desktop host state exists but gateway is unavailable at {}",
+                        state.gateway_endpoint
+                    )
+                },
+            );
+        }
+        Err(_) => emit(
+            json_output,
+            json!({
+                "status": "not_running",
+                "healthy": false,
+            }),
+            "Desktop host is not running".to_owned(),
+        ),
+    }
+    Ok(())
+}
+
+async fn shutdown_desktop_host(paths: &OpenPinchPaths, json_output: bool) -> Result<()> {
+    let state = load_desktop_host_state(paths).context("desktop host is not running")?;
+    std::fs::write(desktop_shutdown_file(paths), b"shutdown")
+        .context("failed to write desktop shutdown request")?;
+
+    for _ in 0..20 {
+        if !desktop_host_state_file(paths).exists() {
+            break;
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+
+    emit(
+        json_output,
+        json!({
+            "status": "shutdown_requested",
+            "gateway": state.gateway_endpoint,
+        }),
+        format!(
+            "Desktop host shutdown requested for {}",
+            state.gateway_endpoint
+        ),
+    );
+    Ok(())
+}
+
+fn desktop_host_state_file(paths: &OpenPinchPaths) -> PathBuf {
+    paths.runtime_dir.join("desktop-host.json")
+}
+
+fn desktop_shutdown_file(paths: &OpenPinchPaths) -> PathBuf {
+    paths.runtime_dir.join("desktop-host.shutdown")
+}
+
+fn load_desktop_host_state(paths: &OpenPinchPaths) -> Result<DesktopHostState> {
+    let raw = std::fs::read(desktop_host_state_file(paths))
+        .context("failed to read desktop host state")?;
+    serde_json::from_slice(&raw).context("failed to parse desktop host state")
+}
+
+fn write_desktop_host_state(paths: &OpenPinchPaths, state: &DesktopHostState) -> Result<()> {
+    let raw = serde_json::to_vec_pretty(state).context("failed to serialize desktop host state")?;
+    std::fs::write(desktop_host_state_file(paths), raw)
+        .context("failed to write desktop host state")
+}
+
+async fn healthy_desktop_host(paths: &OpenPinchPaths) -> Result<Option<DesktopHostState>> {
+    let state = match load_desktop_host_state(paths) {
+        Ok(state) => state,
+        Err(_) => return Ok(None),
+    };
+    if wait_for_gateway(&state.gateway_endpoint, Duration::from_millis(500))
+        .await
+        .is_ok()
+    {
+        Ok(Some(state))
+    } else {
+        let _ = std::fs::remove_file(desktop_host_state_file(paths));
+        Ok(None)
+    }
+}
+
+fn now_unix_timestamp() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_owned())
 }
 
 async fn execute_command(
@@ -892,13 +1129,13 @@ async fn handle_onboard_command(
     let value = json!({
         "config": paths.config_file,
         "gateway_grpc": config.gateway.listen_address,
-        "gateway_web": config.gateway.web.listen_address,
-        "remote_mode": config.gateway.remote.mode,
+        "gateway_local_http": config.gateway.local_http.listen_address,
+        "desktop_profile": config.desktop.profile_name,
         "doctor": doctor,
         "next_steps": [
-            format!("openpinch start --foreground"),
+            format!("openpinch desktop host"),
             format!("openpinch doctor"),
-            format!("visit http://{}", config.gateway.web.listen_address),
+            format!("openpinch desktop health"),
         ],
     });
     emit(
@@ -930,6 +1167,37 @@ async fn handle_message_command(
 ) -> Result<()> {
     let mut client = connect_gateway(config).await?;
     match command {
+        MessageCommand::Post {
+            connector,
+            channel_id,
+            body,
+            sender,
+            metadata,
+        } => {
+            let response = client
+                .submit_message(SubmitMessageRequest {
+                    connector,
+                    channel_id,
+                    sender,
+                    body,
+                    metadata_json: metadata,
+                })
+                .await?
+                .into_inner();
+            let value = json!({
+                "accepted": response.accepted,
+                "message_id": response.message_id,
+                "reply": response.reply,
+                "session_id": response.session_id,
+                "pairing_id": response.pairing_id,
+                "delivery_state": response.delivery_state,
+            });
+            emit(
+                json_output,
+                value.clone(),
+                serde_json::to_string_pretty(&value)?,
+            );
+        }
         MessageCommand::Send {
             connector,
             channel_id,
@@ -1672,6 +1940,7 @@ async fn doctor_value(config: &AppConfig, paths: &OpenPinchPaths) -> Result<serd
                 include_connectors: true,
                 include_models: true,
                 include_web: true,
+                include_desktop: true,
             })
             .await?
             .into_inner();

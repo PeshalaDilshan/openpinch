@@ -566,7 +566,7 @@ impl EngineRuntime {
         &self,
         include_connectors: bool,
         include_models: bool,
-        include_web: bool,
+        include_desktop: bool,
     ) -> Result<DoctorReport> {
         let mut findings = Vec::new();
         let health = self.inner.tools.health().await;
@@ -645,26 +645,23 @@ impl EngineRuntime {
             }
         }
 
-        if include_web {
+        if include_desktop {
             findings.push(DoctorFinding {
-                id: "gateway-web".to_owned(),
-                component: "gateway.web".to_owned(),
-                severity: if self.inner.config.gateway.web.enabled {
-                    "info".to_owned()
+                id: "desktop-host".to_owned(),
+                component: "desktop.host".to_owned(),
+                severity: "info".to_owned(),
+                status: if self.inner.config.desktop.bundled_runtime {
+                    "bundled".to_owned()
                 } else {
-                    "warning".to_owned()
+                    "external".to_owned()
                 },
-                status: if self.inner.config.gateway.web.enabled {
-                    "enabled".to_owned()
-                } else {
-                    "disabled".to_owned()
-                },
-                summary: "web control surface".to_owned(),
+                summary: "desktop control surface".to_owned(),
                 detail: format!(
-                    "listen={} ui_dir={} remote_mode={}",
-                    self.inner.config.gateway.web.listen_address,
-                    self.inner.config.gateway.web.ui_dir,
-                    self.inner.config.gateway.remote.mode
+                    "profile={} tray={} notifications={} local_http={}",
+                    self.inner.config.desktop.profile_name,
+                    self.inner.config.desktop.enable_tray,
+                    self.inner.config.desktop.enable_notifications,
+                    self.inner.config.gateway.local_http.listen_address
                 ),
             });
         }
@@ -837,7 +834,7 @@ impl EngineRuntime {
         session: &SessionRecord,
         message: &MessageEnvelope,
     ) -> Result<Option<String>> {
-        if message.connector == "webchat" {
+        if message.connector == "desktop" {
             return Ok(None);
         }
         let session_is_direct = session.session_type == "direct";
@@ -1230,7 +1227,7 @@ impl EngineRuntimeService for RuntimeRpcService {
             .doctor_report(
                 request.include_connectors,
                 request.include_models,
-                request.include_web,
+                request.include_desktop || request.include_web,
             )
             .await
             .map_err(internal_status)?;
@@ -4603,7 +4600,7 @@ fn infer_session_type(message: &MessageEnvelope) -> String {
             };
         }
     }
-    if message.connector == "webchat" {
+    if message.connector == "desktop" {
         "direct".to_owned()
     } else if message.channel_id == message.sender {
         "direct".to_owned()

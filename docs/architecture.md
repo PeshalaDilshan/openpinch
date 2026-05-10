@@ -1,17 +1,19 @@
 # Architecture
 
-OpenPinch is split into two long-running components:
+OpenPinch is split into three long-running components:
 
 - The Rust runtime, started through `openpinch start`, owns configuration, SQLite state, model routing, sandbox orchestration, skill verification, and the private engine RPC.
 - The Go gateway owns the public localhost gRPC API, connectors, and scheduling.
+- The Flutter desktop client owns the native operator experience on Linux, macOS, and Windows, and supervises the local runtime through `openpinch desktop host`.
 - Formal protocol specs live alongside the runtime and are enforced by generated validator rules before multi-agent flows are accepted.
 
 ## Runtime Topology
 
 1. `openpinch start` loads configuration and initializes local directories.
 2. The Rust engine starts a private `EngineRuntimeService` endpoint on a Unix domain socket on Unix platforms.
-3. The CLI supervises the Go gateway as a child process and injects the private engine endpoint through environment variables.
+3. `openpinch desktop host` or `openpinch start` supervises the Go gateway as a child process and injects the private engine endpoint through environment variables.
 4. The Go gateway exposes `GatewayService` on localhost and forwards execution, memory, audit, attestation, and multi-agent protocol requests to the engine.
+5. The Flutter desktop client launches the desktop host, reconnects to an already-running host when present, and uses CLI/gRPC surfaces for control, status, and local messaging.
 
 ## Orchestration Layer
 
@@ -31,10 +33,17 @@ OpenPinch is split into two long-running components:
 
 - `internal/config`: gateway configuration loading
 - `internal/enginebridge`: gRPC client for the private engine service
-- `internal/connectors`: Telegram plus a typed 20+ connector catalog
+- `internal/connectors`: Telegram, local `desktop`, plus a typed 20+ connector catalog
 - `internal/scheduler`: cron-style local scheduling for proactive autonomy flows
-- `internal/server`: public gRPC server implementation, zero-trust surfaces, and connector inventory
+- `internal/server`: public local gRPC server implementation, desktop event streams, and connector inventory
 - `deploy/operator`: Kubernetes deployment/operator scaffold for enterprise rollouts
+
+## Desktop Client
+
+- `ui/` is a Flutter desktop application, not a web surface.
+- The desktop app is the primary operator experience and no longer depends on gateway-hosted browser routes.
+- The local desktop chat path is represented as the `desktop` connector inside the engine and gateway.
+- Native packaging is intended to bundle the desktop app with `openpinch` and `openpinch-gateway` sidecars in the same installable artifact.
 
 ## Data Plane
 
