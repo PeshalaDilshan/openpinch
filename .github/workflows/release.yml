@@ -58,6 +58,12 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Install Linux Desktop Build Dependencies
+        if: steps.detect_flutter.outputs.present == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev
+
       - name: Gate Rust
         run: cargo test --workspace
 
@@ -74,7 +80,7 @@ jobs:
           flutter pub get
           flutter analyze
           flutter test
-          flutter build web --release
+          flutter build linux --release
 
       - name: Create Or Update PR From Dev To Main
         uses: actions/github-script@v7
@@ -95,7 +101,7 @@ jobs:
               "- cargo test --workspace",
               "- go test ./...",
               "- go vet ./...",
-              "- flutter analyze/test/build when `ui/pubspec.yaml` exists",
+              "- flutter analyze/test/build linux when `ui/pubspec.yaml` exists",
               "",
               "Direct pushes to `main` should remain blocked with branch protection."
             ].join("\n");
@@ -201,3 +207,99 @@ jobs:
         with:
           name: openpinch-gateway-linux-amd64
           path: bin/openpinch-gateway
+
+  build-desktop-bundles:
+    name: Build Desktop Bundle (${{ matrix.target }})
+    if: github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+          - os: macos-latest
+            target: macos
+          - os: windows-latest
+            target: windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+
+      - name: Cache Rust Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.1"
+          cache-dependency-path: gateway/go.sum
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install Linux Desktop Build Dependencies
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev
+
+      - name: Build CLI
+        run: cargo build -p openpinch-cli --release
+
+      - name: Build Gateway
+        if: runner.os != 'Windows'
+        working-directory: gateway
+        run: go build -o ../bin/openpinch-gateway ./cmd/gateway
+
+      - name: Build Gateway (Windows)
+        if: runner.os == 'Windows'
+        working-directory: gateway
+        shell: pwsh
+        run: go build -o ..\bin\openpinch-gateway.exe .\cmd\gateway
+
+      - name: Build Desktop App
+        working-directory: ui
+        run: |
+          flutter pub get
+          flutter build ${{ matrix.target }} --release
+
+      - name: Package Linux Bundle
+        if: matrix.target == 'linux'
+        run: |
+          cp target/release/openpinch ui/build/linux/x64/release/bundle/
+          cp bin/openpinch-gateway ui/build/linux/x64/release/bundle/
+          mkdir -p dist
+          tar -C ui/build/linux/x64/release -czf dist/OpenPinch-linux-x64.tar.gz bundle
+
+      - name: Package macOS Bundle
+        if: matrix.target == 'macos'
+        run: |
+          cp target/release/openpinch ui/build/macos/Build/Products/Release/OpenPinch.app/Contents/MacOS/
+          cp bin/openpinch-gateway ui/build/macos/Build/Products/Release/OpenPinch.app/Contents/MacOS/
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent ui/build/macos/Build/Products/Release/OpenPinch.app dist/OpenPinch-macos.zip
+
+      - name: Package Windows Bundle
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: |
+          Copy-Item target\release\openpinch.exe ui\build\windows\x64\runner\Release\
+          Copy-Item bin\openpinch-gateway.exe ui\build\windows\x64\runner\Release\
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path ui\build\windows\x64\runner\Release\* -DestinationPath dist\OpenPinch-windows-x64.zip -Force
+
+      - name: Upload Desktop Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openpinch-desktop-${{ matrix.target }}
+          path: dist/*

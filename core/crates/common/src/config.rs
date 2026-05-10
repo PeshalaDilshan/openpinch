@@ -37,6 +37,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub browser: BrowserConfig,
     #[serde(default)]
+    pub desktop: DesktopConfig,
+    #[serde(default)]
     pub vector_memory: VectorMemoryConfig,
     #[serde(default = "default_model_profiles")]
     pub model_profiles: BTreeMap<String, ModelProfileConfig>,
@@ -59,7 +61,11 @@ impl AppConfig {
         if paths.config_file.exists() {
             let raw = fs::read_to_string(&paths.config_file)
                 .with_context(|| format!("failed to read {}", paths.config_file.display()))?;
-            let config = toml::from_str::<Self>(&raw).context("failed to parse config.toml")?;
+            let mut config = toml::from_str::<Self>(&raw).context("failed to parse config.toml")?;
+            merge_missing_defaults(&mut config);
+            if migrate_legacy_config(&raw, &mut config)? {
+                config.write(paths)?;
+            }
             Ok(config)
         } else {
             let config = Self::default();
@@ -81,21 +87,39 @@ impl AppConfig {
             "gateway.binary" => self.gateway.binary = value.to_owned(),
             "gateway.engine_endpoint" => self.gateway.engine_endpoint = value.to_owned(),
             "gateway.telegram_bot_token" => self.gateway.telegram_bot_token = value.to_owned(),
-            "gateway.web.enabled" => {
-                self.gateway.web.enabled = value
+            "gateway.local_http.enabled" | "gateway.web.enabled" => {
+                self.gateway.local_http.enabled = value
                     .parse()
-                    .context("expected bool for gateway.web.enabled")?
+                    .context("expected bool for gateway.local_http.enabled")?
             }
-            "gateway.web.listen_address" => self.gateway.web.listen_address = value.to_owned(),
-            "gateway.auth.enabled" => {
-                self.gateway.auth.enabled = value
-                    .parse()
-                    .context("expected bool for gateway.auth.enabled")?
+            "gateway.local_http.listen_address" | "gateway.web.listen_address" => {
+                self.gateway.local_http.listen_address = value.to_owned()
             }
-            "gateway.remote.enabled" => {
-                self.gateway.remote.enabled = value
+            "desktop.launch_at_login" => {
+                self.desktop.launch_at_login = value
                     .parse()
-                    .context("expected bool for gateway.remote.enabled")?
+                    .context("expected bool for desktop.launch_at_login")?
+            }
+            "desktop.enable_tray" => {
+                self.desktop.enable_tray = value
+                    .parse()
+                    .context("expected bool for desktop.enable_tray")?
+            }
+            "desktop.enable_notifications" => {
+                self.desktop.enable_notifications = value
+                    .parse()
+                    .context("expected bool for desktop.enable_notifications")?
+            }
+            "desktop.start_hidden" => {
+                self.desktop.start_hidden = value
+                    .parse()
+                    .context("expected bool for desktop.start_hidden")?
+            }
+            "desktop.profile_name" => self.desktop.profile_name = value.to_owned(),
+            "desktop.bundled_runtime" => {
+                self.desktop.bundled_runtime = value
+                    .parse()
+                    .context("expected bool for desktop.bundled_runtime")?
             }
             "gateway.tls.enabled" => {
                 self.gateway.tls.enabled = value
@@ -282,6 +306,7 @@ impl Default for AppConfig {
             usage: UsageConfig::default(),
             media: MediaConfig::default(),
             browser: BrowserConfig::default(),
+            desktop: DesktopConfig::default(),
             vector_memory: VectorMemoryConfig::default(),
             model_profiles: default_model_profiles(),
             model_failover: ModelFailoverConfig::default(),
@@ -298,6 +323,7 @@ fn default_connectors() -> BTreeMap<String, ConnectorConfig> {
     let mut connectors = BTreeMap::new();
     for name in [
         "telegram",
+        "desktop",
         "discord",
         "slack",
         "whatsapp",
@@ -317,33 +343,32 @@ fn default_connectors() -> BTreeMap<String, ConnectorConfig> {
         "imap",
         "twilio-sms",
         "twilio-mms",
-        "webchat",
         "webhook-inbound",
         "webhook-outbound",
     ] {
         connectors.insert(
             name.to_owned(),
             ConnectorConfig {
-                enabled: name == "telegram" || name == "webchat",
+                enabled: name == "telegram" || name == "desktop",
                 mode: if name == "telegram" {
                     "polling".to_owned()
-                } else if name == "webchat" {
-                    "web".to_owned()
+                } else if name == "desktop" {
+                    "native".to_owned()
                 } else {
                     "disabled".to_owned()
                 },
                 endpoint: String::new(),
                 allowlist: Vec::new(),
                 api_first: true,
-                deferred: name != "telegram" && name != "webchat",
-                auth_mode: if name == "webchat" {
-                    "local-session".to_owned()
+                deferred: name != "telegram" && name != "desktop",
+                auth_mode: if name == "desktop" {
+                    "local-process".to_owned()
                 } else {
                     "token".to_owned()
                 },
-                pair_dm: true,
+                pair_dm: name != "desktop",
                 chunk_limit: 1800,
-                mention_only: name != "telegram" && name != "webchat",
+                mention_only: name != "telegram" && name != "desktop",
             },
         );
     }
@@ -403,6 +428,60 @@ fn default_models() -> BTreeMap<String, ModelProviderConfig> {
     models
 }
 
+fn merge_missing_defaults(config: &mut AppConfig) {
+    for (name, connector) in default_connectors() {
+        config.connectors.entry(name).or_insert(connector);
+    }
+
+    for (name, profile) in default_model_profiles() {
+        config.model_profiles.entry(name).or_insert(profile);
+    }
+}
+
+fn migrate_legacy_config(raw: &str, config: &mut AppConfig) -> Result<bool> {
+    let value = toml::from_str::<toml::Value>(raw).context("failed to parse raw config")?;
+    let mut changed = false;
+
+    if let Some(connectors) = value.get("connectors").and_then(toml::Value::as_table) {
+        if let Some(legacy) = connectors.get("webchat") {
+            let mut connector = legacy
+                .clone()
+                .try_into::<ConnectorConfig>()
+                .unwrap_or_default();
+            if connector.mode.is_empty() || connector.mode == "web" {
+                connector.mode = "native".to_owned();
+            }
+            if connector.auth_mode.is_empty() || connector.auth_mode == "local-session" {
+                connector.auth_mode = "local-process".to_owned();
+            }
+            connector.deferred = false;
+            connector.pair_dm = false;
+            connector.mention_only = false;
+            config.connectors.insert("desktop".to_owned(), connector);
+            config.connectors.remove("webchat");
+            changed = true;
+        }
+    }
+
+    if let Some(gateway) = value.get("gateway").and_then(toml::Value::as_table) {
+        if let Some(legacy_web) = gateway.get("web").and_then(toml::Value::as_table) {
+            if let Some(enabled) = legacy_web.get("enabled").and_then(toml::Value::as_bool) {
+                config.gateway.local_http.enabled = enabled;
+                changed = true;
+            }
+            if let Some(listen) = legacy_web
+                .get("listen_address")
+                .and_then(toml::Value::as_str)
+            {
+                config.gateway.local_http.listen_address = listen.to_owned();
+                changed = true;
+            }
+        }
+    }
+
+    Ok(changed)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayConfig {
     #[serde(default = "default_gateway_listen")]
@@ -418,11 +497,7 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub tls: GatewayTlsConfig,
     #[serde(default)]
-    pub web: GatewayWebConfig,
-    #[serde(default)]
-    pub auth: GatewayAuthConfig,
-    #[serde(default)]
-    pub remote: GatewayRemoteConfig,
+    pub local_http: GatewayLocalHttpConfig,
     #[serde(default)]
     pub allowlists: BTreeMap<String, Vec<String>>,
 }
@@ -440,9 +515,7 @@ impl Default for GatewayConfig {
             telegram_bot_token: String::new(),
             telegram_poll_interval_seconds: 5,
             tls: GatewayTlsConfig::default(),
-            web: GatewayWebConfig::default(),
-            auth: GatewayAuthConfig::default(),
-            remote: GatewayRemoteConfig::default(),
+            local_http: GatewayLocalHttpConfig::default(),
             allowlists,
         }
     }
@@ -471,78 +544,24 @@ pub struct GatewayTlsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GatewayWebConfig {
-    #[serde(default = "default_true")]
+pub struct GatewayLocalHttpConfig {
+    #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_gateway_web_listen")]
+    #[serde(default = "default_gateway_local_http_listen")]
     pub listen_address: String,
-    #[serde(default = "default_gateway_web_ui_dir")]
-    pub ui_dir: String,
-    #[serde(default)]
-    pub cors_origin: String,
 }
 
-impl Default for GatewayWebConfig {
+impl Default for GatewayLocalHttpConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            listen_address: default_gateway_web_listen(),
-            ui_dir: default_gateway_web_ui_dir(),
-            cors_origin: String::new(),
+            enabled: false,
+            listen_address: default_gateway_local_http_listen(),
         }
     }
 }
 
-fn default_gateway_web_listen() -> String {
+fn default_gateway_local_http_listen() -> String {
     "127.0.0.1:8088".to_owned()
-}
-
-fn default_gateway_web_ui_dir() -> String {
-    "ui/build/web".to_owned()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GatewayAuthConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub token: String,
-    #[serde(default)]
-    pub password: String,
-}
-
-impl Default for GatewayAuthConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            token: String::new(),
-            password: String::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GatewayRemoteConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_remote_mode")]
-    pub mode: String,
-    #[serde(default)]
-    pub public_base_url: String,
-}
-
-impl Default for GatewayRemoteConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            mode: default_remote_mode(),
-            public_base_url: String::new(),
-        }
-    }
-}
-
-fn default_remote_mode() -> String {
-    "disabled".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1170,6 +1189,39 @@ impl Default for BrowserConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopConfig {
+    #[serde(default)]
+    pub launch_at_login: bool,
+    #[serde(default = "default_true")]
+    pub enable_tray: bool,
+    #[serde(default = "default_true")]
+    pub enable_notifications: bool,
+    #[serde(default)]
+    pub start_hidden: bool,
+    #[serde(default = "default_desktop_profile_name")]
+    pub profile_name: String,
+    #[serde(default = "default_true")]
+    pub bundled_runtime: bool,
+}
+
+impl Default for DesktopConfig {
+    fn default() -> Self {
+        Self {
+            launch_at_login: false,
+            enable_tray: true,
+            enable_notifications: true,
+            start_hidden: false,
+            profile_name: default_desktop_profile_name(),
+            bundled_runtime: true,
+        }
+    }
+}
+
+fn default_desktop_profile_name() -> String {
+    "default".to_owned()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorMemoryConfig {
     #[serde(default = "default_vector_backend")]
     pub requested_backend: String,
@@ -1428,9 +1480,9 @@ mod tests {
         assert_eq!(config.brain.max_inline_suggestions, 2);
         assert_eq!(config.vector_memory.requested_backend, "lancedb");
         assert!(config.connectors.contains_key("telegram"));
-        assert!(config.connectors.contains_key("webchat"));
+        assert!(config.connectors.contains_key("desktop"));
         assert!(config.connectors.contains_key("twilio-mms"));
-        assert!(config.gateway.web.enabled);
+        assert!(config.desktop.enable_tray);
         assert_eq!(config.model_failover.default_profile, "default");
     }
 
@@ -1450,8 +1502,11 @@ mod tests {
             .set("brain.context_budget_chars", "4096")
             .expect("set brain field");
         config
-            .set("gateway.web.enabled", "false")
-            .expect("set gateway web field");
+            .set("gateway.local_http.enabled", "true")
+            .expect("set gateway local http field");
+        config
+            .set("desktop.bundled_runtime", "false")
+            .expect("set desktop field");
         config
             .set("sessions.prune_after_hours", "24")
             .expect("set session field");
@@ -1460,7 +1515,8 @@ mod tests {
         assert!(!config.security.audit.enabled);
         assert_eq!(config.brain.context_budget_chars, 4096);
         assert_eq!(config.connectors["matrix"].mode, "bridge");
-        assert!(!config.gateway.web.enabled);
+        assert!(config.gateway.local_http.enabled);
+        assert!(!config.desktop.bundled_runtime);
         assert_eq!(config.sessions.prune_after_hours, 24);
     }
 }

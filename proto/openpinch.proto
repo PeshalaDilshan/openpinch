@@ -36,6 +36,7 @@ service GatewayService {
   rpc QueueTask(QueueTaskRequest) returns (QueueTaskResponse);
   rpc GetPolicyReport(PolicyReportRequest) returns (PolicyReportResponse);
   rpc StreamUiEvents(UiEventStreamRequest) returns (stream UiEvent);
+  rpc StreamDesktopEvents(DesktopEventStreamRequest) returns (stream DesktopEvent);
 }
 
 service EngineRuntimeService {
@@ -399,6 +400,7 @@ message DoctorReportRequest {
   bool include_connectors = 1;
   bool include_models = 2;
   bool include_web = 3;
+  bool include_desktop = 4;
 }
 
 message DoctorFinding {
@@ -435,6 +437,17 @@ message UiEventStreamRequest {
 }
 
 message UiEvent {
+  string id = 1;
+  string event_type = 2;
+  string payload_json = 3;
+  string created_at = 4;
+}
+
+message DesktopEventStreamRequest {
+  string cursor = 1;
+}
+
+message DesktopEvent {
   string id = 1;
   string event_type = 2;
   string payload_json = 3;

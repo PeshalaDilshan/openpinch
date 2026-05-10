@@ -4,6 +4,7 @@
 
 - Rust pinned to `1.94.1` via `rust-toolchain.toml`
 - Go `1.26.1`
+- Flutter stable with Linux/macOS/Windows desktop support enabled
 - `make`
 - On Linux, optional Firecracker + `jailer` for the full sandbox backend
 
@@ -15,6 +16,16 @@ make cli
 ```
 
 The setup script prepares writable Go caches, downloads Go dependencies, and installs the pinned Rust toolchain if `rustup` is present.
+
+For the native desktop client:
+
+```bash
+cd ui
+flutter pub get
+flutter analyze
+flutter test
+flutter build linux --release
+```
 
 ## Branch Setup
 
@@ -42,7 +53,14 @@ The full branch and CI policy is documented in [branching-and-ci.md](branching-a
 
 ```bash
 ./target/release/openpinch config init
-./target/release/openpinch start --foreground
+./target/release/openpinch desktop host
+```
+
+If you are running the Flutter desktop shell during development, start the app after the config exists:
+
+```bash
+cd ui
+flutter run -d linux
 ```
 
 ## Optional Local Models
@@ -53,7 +71,7 @@ The full branch and CI policy is documented in [branching-and-ci.md](branching-a
 
 ## CI And Release Notes
 
-- Pushes to `dev` run Rust, Go, and Flutter CI.
+- Pushes to `dev` run Rust, Go, and Flutter desktop CI.
 - Successful `dev` validation triggers the promotion automation in `.github/workflows/release.yml`.
 - Pull requests into `main` run the CI workflows again as a stability gate.
-- Pushes to `main` build release artifacts for the CLI and gateway.
+- Pushes to `main` build release artifacts for the CLI, gateway, and desktop client bundles.

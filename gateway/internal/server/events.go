@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-type UiEvent struct {
+type DesktopEvent struct {
 	ID          string `json:"id"`
 	EventType   string `json:"event_type"`
 	PayloadJSON string `json:"payload_json"`
@@ -17,20 +17,20 @@ type UiEvent struct {
 type EventHub struct {
 	mu      sync.Mutex
 	nextID  int
-	history []UiEvent
-	subs    map[int]chan UiEvent
+	history []DesktopEvent
+	subs    map[int]chan DesktopEvent
 }
 
 func NewEventHub() *EventHub {
 	return &EventHub{
-		history: make([]UiEvent, 0, 64),
-		subs:    map[int]chan UiEvent{},
+		history: make([]DesktopEvent, 0, 64),
+		subs:    map[int]chan DesktopEvent{},
 	}
 }
 
 func (h *EventHub) Publish(eventType string, payload any) {
 	raw, _ := json.Marshal(payload)
-	event := UiEvent{
+	event := DesktopEvent{
 		ID:          fmt.Sprintf("ui-%d", time.Now().UTC().UnixNano()),
 		EventType:   eventType,
 		PayloadJSON: string(raw),
@@ -51,12 +51,12 @@ func (h *EventHub) Publish(eventType string, payload any) {
 	h.mu.Unlock()
 }
 
-func (h *EventHub) Subscribe() (int, <-chan UiEvent) {
+func (h *EventHub) Subscribe() (int, <-chan DesktopEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	id := h.nextID
 	h.nextID++
-	ch := make(chan UiEvent, 32)
+	ch := make(chan DesktopEvent, 32)
 	h.subs[id] = ch
 	return id, ch
 }
@@ -70,10 +70,10 @@ func (h *EventHub) Unsubscribe(id int) {
 	}
 }
 
-func (h *EventHub) History() []UiEvent {
+func (h *EventHub) History() []DesktopEvent {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	snapshot := make([]UiEvent, len(h.history))
+	snapshot := make([]DesktopEvent, len(h.history))
 	copy(snapshot, h.history)
 	return snapshot
 }

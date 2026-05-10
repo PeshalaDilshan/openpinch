@@ -283,12 +283,14 @@ pub struct ModelProfileRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UiEventRecord {
+pub struct DesktopEventRecord {
     pub id: String,
     pub event_type: String,
     pub payload_json: String,
     pub created_at: DateTime<Utc>,
 }
+
+pub type UiEventRecord = DesktopEventRecord;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrainRemember {

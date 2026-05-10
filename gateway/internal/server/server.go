@@ -63,6 +63,7 @@ type GatewayServiceServer interface {
 	GetPolicyReport(context.Context, proto.Message) (proto.Message, error)
 	TailLogs(proto.Message, grpc.ServerStream) error
 	StreamUiEvents(proto.Message, grpc.ServerStream) error
+	StreamDesktopEvents(proto.Message, grpc.ServerStream) error
 }
 
 func New(cfg *config.Config, bridge *enginebridge.Client, scheduler *scheduler.Scheduler, registry *connectors.Registry) (*Service, error) {
@@ -119,6 +120,7 @@ func (s *Service) Register(server *grpc.Server) error {
 		Streams: []grpc.StreamDesc{
 			{StreamName: "TailLogs", Handler: streamHandler("openpinch.v1.LogRequest", s.TailLogs), ServerStreams: true},
 			{StreamName: "StreamUiEvents", Handler: streamHandler("openpinch.v1.UiEventStreamRequest", s.StreamUiEvents), ServerStreams: true},
+			{StreamName: "StreamDesktopEvents", Handler: streamHandler("openpinch.v1.DesktopEventStreamRequest", s.StreamDesktopEvents), ServerStreams: true},
 		},
 	}, s)
 	return nil
@@ -528,7 +530,7 @@ func (s *Service) GetDoctorReport(ctx context.Context, request proto.Message) (p
 		ctx,
 		pb.GetBool(reflection, "include_connectors"),
 		pb.GetBool(reflection, "include_models"),
-		pb.GetBool(reflection, "include_web"),
+		pb.GetBool(reflection, "include_desktop") || pb.GetBool(reflection, "include_web"),
 	)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get doctor report: %v", err)
@@ -813,11 +815,19 @@ func (s *Service) TailLogs(request proto.Message, stream grpc.ServerStream) erro
 }
 
 func (s *Service) StreamUiEvents(_ proto.Message, stream grpc.ServerStream) error {
+	return s.streamDesktopEvents(stream, false)
+}
+
+func (s *Service) StreamDesktopEvents(_ proto.Message, stream grpc.ServerStream) error {
+	return s.streamDesktopEvents(stream, true)
+}
+
+func (s *Service) streamDesktopEvents(stream grpc.ServerStream, desktop bool) error {
 	id, ch := s.events.Subscribe()
 	defer s.events.Unsubscribe(id)
 
 	for _, event := range s.events.History() {
-		if err := stream.SendMsg(protoUiEventMessage(s.schema, event)); err != nil {
+		if err := stream.SendMsg(protoDesktopEventMessage(s.schema, event, desktop)); err != nil {
 			return err
 		}
 	}
@@ -827,7 +837,7 @@ func (s *Service) StreamUiEvents(_ proto.Message, stream grpc.ServerStream) erro
 		case <-stream.Context().Done():
 			return stream.Context().Err()
 		case event := <-ch:
-			if err := stream.SendMsg(protoUiEventMessage(s.schema, event)); err != nil {
+			if err := stream.SendMsg(protoDesktopEventMessage(s.schema, event, desktop)); err != nil {
 				return err
 			}
 		}
@@ -999,8 +1009,12 @@ func protoModelProfileMessage(schema *pb.Schema, record enginebridge.ModelProfil
 	return message
 }
 
-func protoUiEventMessage(schema *pb.Schema, record UiEvent) proto.Message {
-	message := schema.NewMessage("openpinch.v1.UiEvent")
+func protoDesktopEventMessage(schema *pb.Schema, record DesktopEvent, desktop bool) proto.Message {
+	fullName := "openpinch.v1.UiEvent"
+	if desktop {
+		fullName = "openpinch.v1.DesktopEvent"
+	}
+	message := schema.NewMessage(fullName)
 	reflection := message.ProtoReflect()
 	pb.SetString(reflection, "id", record.ID)
 	pb.SetString(reflection, "event_type", record.EventType)

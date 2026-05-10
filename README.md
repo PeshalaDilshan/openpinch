@@ -18,12 +18,12 @@ The stack is split deliberately:
 - Async task queue with interactive, connector, autonomy, and background priorities
 - Encrypted vector-memory fallback backed by SQLite with a LanceDB-oriented config surface
 - Signed skills registry with Ed25519 verification
-- Gateway-first messaging architecture with a 20+ connector catalog, Telegram end to end, and local WebChat over HTTP/SSE
-- Browser-facing control surface served by the gateway with sessions, pairings, doctor, model profiles, and webchat views
+- Gateway-first messaging architecture with a 20+ connector catalog, Telegram end to end, and a first-class local `desktop` connector
+- Flutter desktop control shell for Linux, macOS, and Windows with sessions, pairings, doctor, model profiles, brain, and local desktop chat
 - Zero-trust gateway options: mTLS, per-channel allowlists, attestation reporting, audit export
 - Formal protocol spec support for multi-agent handoff flows
 - Structured logging, local SQLite state, graceful shutdown, and deterministic setup scripts
-- Branch-aware CI with `dev -> main` promotion automation and separate Rust/Go/Flutter workflows
+- Branch-aware CI with `dev -> main` promotion automation and separate Rust/Go/Flutter desktop workflows
 
 ## Repository Layout
 
@@ -41,7 +41,7 @@ The stack is split deliberately:
 ├── skills/               # trust roots, registry, example skills
 ├── docs/                 # architecture, setup, sandbox, skills
 ├── scripts/              # bootstrap and helper scripts
-└── ui/                   # Flutter web control surface
+└── ui/                   # Flutter desktop client
 ```
 
 ## Quick Start
@@ -64,6 +64,15 @@ openpinch policy show builtin.command
 openpinch audit export --sink json
 openpinch attest --include-hardware
 openpinch agent protocol handoff.v1 --initiator planner --message planner:executor:run-task
+openpinch desktop health
+```
+
+For the desktop shell during development:
+
+```bash
+cd ui
+flutter pub get
+flutter run -d linux
 ```
 
 ## Local Runtime Model Support
@@ -123,6 +132,7 @@ openpinch logs --tail 100
 ## Documentation
 
 - [Setup](docs/setup.md)
+- [Desktop Client](docs/desktop.md)
 - [Architecture](docs/architecture.md)
 - [Branching And CI](docs/branching-and-ci.md)
 - [Ownership](docs/ownership.md)
@@ -135,4 +145,4 @@ openpinch logs --tail 100
 
 ## Project Status
 
-This repository is intentionally production-shaped, but still early in product maturity. The orchestration, connector catalog, policy surface, encryption hooks, and audit/attestation APIs are in place; the deepest platform-specific pieces such as real guest images, eBPF collectors, and operator reconciliation are the areas that will continue to evolve.
+This repository is intentionally production-shaped, but still early in product maturity. The orchestration, connector catalog, desktop client, policy surface, encryption hooks, and audit/attestation APIs are in place; the deepest platform-specific pieces such as real guest images, eBPF collectors, release signing, and operator reconciliation are the areas that will continue to evolve.

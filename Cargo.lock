@@ -1270,6 +1270,7 @@ dependencies = [
  "openpinch-common",
  "openpinch-engine",
  "openpinch-tools",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-util",

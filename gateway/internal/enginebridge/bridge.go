@@ -530,11 +530,12 @@ func (c *Client) RecordOutboundMessage(ctx context.Context, connector string, ch
 	}, nil
 }
 
-func (c *Client) GetDoctorReport(ctx context.Context, includeConnectors bool, includeModels bool, includeWeb bool) (*DoctorReport, error) {
+func (c *Client) GetDoctorReport(ctx context.Context, includeConnectors bool, includeModels bool, includeDesktop bool) (*DoctorReport, error) {
 	request := c.schema.NewMessage("openpinch.v1.DoctorReportRequest")
 	pb.SetBool(request.ProtoReflect(), "include_connectors", includeConnectors)
 	pb.SetBool(request.ProtoReflect(), "include_models", includeModels)
-	pb.SetBool(request.ProtoReflect(), "include_web", includeWeb)
+	pb.SetBool(request.ProtoReflect(), "include_web", includeDesktop)
+	pb.SetBool(request.ProtoReflect(), "include_desktop", includeDesktop)
 
 	response := c.schema.NewMessage("openpinch.v1.DoctorReportResponse")
 	if err := c.invoke(ctx, "/openpinch.v1.EngineRuntimeService/GetDoctorReport", request, response); err != nil {
